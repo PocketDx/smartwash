@@ -1,5 +1,5 @@
-# 💉GESECA 🩺
-Sistema Web Para La Gestión Y Seguimiento De Campañas De Promoción De La Salud Y Prevención De La Enfermedad
+# 📦 SMARTWASH ⚙️
+Sistema de Gestión Operativa y Fidelización de lavanderias
 
 ---
 
