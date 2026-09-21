@@ -4,7 +4,7 @@ Sistema web de gestion operativa y fidelizacion para lavanderias.
 Proyecto academico 🚧 en desarrollo.
 
 - Backend: **Django 6 + Django REST Framework** (SQLite en local)
-- Frontend: **Next.js 16 (App Router, JavaScript)**
+- Frontend: **Next.js 16 (App Router, TypeScript)**
 - Autenticacion: **sesiones de Django + cookies**
 
 > Contexto del proyecto y decisiones tecnicas: [plot.md](plot.md).
@@ -177,7 +177,7 @@ Respuesta esperada:
 Esa peticion sale de Next.js (`:3000`) y la responde Django (`:8000`): si
 devuelve ese JSON, el puente entre ambos funciona.
 
-> El navegador nunca llama a Django directamente: `frontend/next.config.mjs`
+> El navegador nunca llama a Django directamente: `frontend/next.config.ts`
 > reenvia `/api/*` al backend. Por eso las cookies de sesion funcionan sin CORS.
 
 ---
@@ -211,35 +211,42 @@ cd frontend && npm run lint && npm run build
 
 ## 6. Flujo de trabajo con Git
 
-Ramas cortas desde `main` y Pull Request hacia `main`. Sin `develop`, sin
-`release`, sin Git Flow.
+Ramas cortas desde `dev` y Pull Request hacia `dev`. `main` recibe solo merges
+desde `dev`. Sin `release`, sin Git Flow completo.
 
 ```
-main
- ├── feature/login
- ├── feature/customers
- ├── feature/orders
- └── fix/authentication
+main                  ← solo recibe merges desde dev
+ └── dev              ← aqui se integra el trabajo diario
+      ├── feature/login
+      ├── feature/customers
+      ├── feature/orders
+      └── fix/authentication
 ```
 
 Por cada tarea:
 
 ```bash
-git switch main && git pull          # 1. actualizar main
-git switch -c feature/mi-tarea       # 2. rama para la tarea
+git switch dev && git pull                          # 1. actualizar dev
+git switch -c feature/mi-tarea                      # 2. rama para la tarea
 # 3. implementar cambios enfocados
-git push -u origin feature/mi-tarea  # 4. abrir el Pull Request
-# 5. resolver los comentarios de la revision
-# 6. merge a main desde GitHub
+git push -u origin feature/mi-tarea                 # 4. subir la rama
+gh pr create --base dev                             # 5. abrir el PR contra dev
+# 6. resolver los comentarios de la revision
+# 7. merge a dev desde GitHub
 ```
 
 Reglas:
 
-- Nunca se commitea directamente sobre `main`.
+- **El PR va contra `dev`, no contra `main`.** `main` sigue siendo la rama por
+  defecto en GitHub, asi que al abrir el PR desde la interfaz hay que cambiar la
+  base a `dev` a mano. Con `gh pr create --base dev` no te puedes equivocar.
+- Nunca se commitea directamente sobre `main` ni sobre `dev`.
 - Una rama por tarea de Jira; referencia el ticket en el commit
   (`feat(ordenes): registrar prendas (SCRUM-76)`).
-- Antes de abrir el PR, actualiza tu rama: `git pull --rebase origin main`.
+- Antes de abrir el PR, actualiza tu rama: `git pull --rebase origin dev`.
 - Cambios enfocados: no reformatees archivos completos ni mezcles tareas.
+
+Cuando `dev` esta estable, se abre un PR `dev` -> `main` para publicar.
 
 Si trabajas con un agente de IA, pasale [AGENTS.md](AGENTS.md).
 
@@ -271,7 +278,7 @@ Dos ajustes en **Settings** del proyecto de Vercel:
 | **Root Directory** | `frontend` | La app de Next no esta en la raiz del repo. Ya esta puesto |
 | **Environment Variables** → `BACKEND_URL` | URL publica del backend | Sin esto el rewrite apunta a `http://127.0.0.1:8000`, que en Vercel no existe |
 
-> **`BACKEND_URL` se lee en tiempo de build**, porque `next.config.mjs` la usa
+> **`BACKEND_URL` se lee en tiempo de build**, porque `next.config.ts` la usa
 > para construir el rewrite. Cambiarla en Vercel **exige un redeploy**; no basta
 > con reiniciar.
 
