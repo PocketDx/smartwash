@@ -28,7 +28,7 @@ Dominio, segun las epicas de Jira:
 
 - **Backend:** Django 6.1 + Django REST Framework. Python 3.12+.
 - **Base de datos:** SQLite en local; PostgreSQL mas adelante via `DATABASE_URL`.
-- **Frontend:** Next.js 16 (App Router) en **JavaScript**. Nada de TypeScript.
+- **Frontend:** Next.js 16 (App Router) en **TypeScript**.
 - **Estilos:** Tailwind CSS v4.
 - **Autenticacion:** sesiones nativas de Django + cookies. Nada de JWT ni OAuth.
 - **Despliegue:** el frontend va a Vercel. El backend todavia no tiene destino.
@@ -45,9 +45,9 @@ smartwash/
 │   ├── requirements.txt
 │   └── .env.example
 ├── frontend/
-│   ├── app/             # App Router: page.jsx (dashboard), login/page.jsx
-│   ├── lib/api.js       # unico cliente HTTP hacia Django
-│   ├── next.config.mjs  # rewrite /api/* -> Django
+│   ├── app/             # App Router: page.tsx (dashboard), login/page.tsx
+│   ├── lib/api.ts       # cliente HTTP hacia Django + tipos de la API
+│   ├── next.config.ts   # rewrite /api/* -> Django
 │   └── .env.example
 ├── plot.md              # este archivo
 ├── AGENTS.md            # reglas de trabajo para agentes
@@ -61,7 +61,7 @@ No crees apps vacias "para despues".
 
 ## Como se comunican frontend y backend
 
-El navegador **nunca** llama a Django directamente. `frontend/next.config.mjs`
+El navegador **nunca** llama a Django directamente. `frontend/next.config.ts`
 reenvia `/api/:path*` al backend (`BACKEND_URL`):
 
 ```
@@ -79,7 +79,7 @@ Consecuencias, que hay que respetar al agregar endpoints:
   lo que rompe los POST. El admin de Django (`/admin/`) no pasa por el rewrite y
   conserva su barra.
 - Peticiones de escritura desde el navegador requieren el header `X-CSRFToken`.
-  `lib/api.js` ya lo resuelve: usalo en lugar de `fetch` directo.
+  `lib/api.ts` ya lo resuelve: usalo en lugar de `fetch` directo.
 
 ## Endpoints existentes
 
@@ -101,9 +101,10 @@ Consecuencias, que hay que respetar al agregar endpoints:
   `urls.py`, `admin.py`, `tests.py`. Permisos por defecto: `IsAuthenticated`
   (definido en `REST_FRAMEWORK`); usa `AllowAny` explicito para lo publico.
 - **Frontend:** Server Components por defecto; `"use client"` solo cuando haya
-  interactividad. Todo acceso a la API pasa por `lib/api.js`. Alias `@/` a la raiz
+  interactividad. Todo acceso a la API pasa por `lib/api.ts`. Alias `@/` a la raiz
   de `frontend/`.
-- Nada de TypeScript en `frontend/`.
+- El tipo de cada respuesta de la API se declara en `lib/api.ts` (`User`, `Rol`,
+  etc.). Nada de `any`.
 - Variables de entorno: toda variable nueva se documenta en el `.env.example`
   correspondiente. Nunca se commitea un `.env` real.
 

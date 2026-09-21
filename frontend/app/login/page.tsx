@@ -1,23 +1,23 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useState, type FormEvent } from "react";
 
 import { api } from "@/lib/api";
 
 export default function LoginPage() {
   const router = useRouter();
-  const [error, setError] = useState(null);
+  const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
 
-  async function onSubmit(event) {
+  async function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setPending(true);
     setError(null);
 
     const form = new FormData(event.currentTarget);
 
-    let response;
+    let response: Response;
     try {
       response = await api("/auth/login", {
         method: "POST",
@@ -39,7 +39,9 @@ export default function LoginPage() {
       return;
     }
 
-    const data = await response.json().catch(() => ({}));
+    const data = (await response.json().catch(() => ({}))) as {
+      detail?: string;
+    };
     setError(data.detail ?? "No fue posible iniciar sesion.");
     setPending(false);
   }
