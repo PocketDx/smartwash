@@ -1,3 +1,6 @@
+Las reglas del proyecto estan en la raiz del repositorio: ../AGENTS.md y ../plot.md.
+Leelas antes de tocar el frontend.
+
 <!-- BEGIN:nextjs-agent-rules -->
 
 # This is NOT the Next.js you know
