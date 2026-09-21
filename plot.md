@@ -41,6 +41,9 @@ smartwash/
 │   ├── config/          # settings.py (unico, por entorno), urls.py, wsgi/asgi
 │   ├── accounts/        # modelo User con rol + endpoints de autenticacion
 │   ├── core/            # health check y utilidades transversales
+│   ├── clientes/        # Cliente (EP02)
+│   ├── catalogo/        # Servicio y Tarifa (EP03)
+│   ├── ordenes/         # Orden y Prenda (EP04, EP05)
 │   ├── manage.py
 │   ├── requirements.txt
 │   └── .env.example
@@ -54,10 +57,32 @@ smartwash/
 └── README.md            # como levantar el proyecto
 ```
 
-Cada dominio nuevo del backlog entra como **una app de Django** bajo `backend/`
-(`clientes/`, `catalogo/`, `ordenes/`, `pagos/`, `fidelizacion/`,
-`notificaciones/`). No existen todavia: se crean cuando se implemente su historia.
+Cada dominio nuevo del backlog entra como **una app de Django** bajo `backend/`.
+Ya existen `clientes/`, `catalogo/` y `ordenes/`, con sus modelos pero **sin
+endpoints**: T2 (SCRUM-51) pedia solo las entidades nucleo. Faltan `pagos/`,
+`fidelizacion/` y `notificaciones/`: se crean cuando se implemente su historia.
 No crees apps vacias "para despues".
+
+### Modelo de datos
+
+| Modelo | App | Notas |
+|--------|-----|-------|
+| `Cliente` | clientes | `(tipo_documento, documento)` unico (HU05) |
+| `Servicio` | catalogo | Nombre unico |
+| `Tarifa` | catalogo | Historica: un servicio acumula tarifas en vez de un precio mutable, para que cambiar el precio hoy no altere las ordenes de ayer |
+| `Orden` | ordenes | `codigo` unico y publico (HU17). `total` y `entrega_estimada` se calculan en HU09; el flujo de estados es HU14 |
+| `Prenda` | ordenes | `valor_unitario` se copia de la tarifa al registrar, no se lee de `Tarifa` |
+
+Reglas que valen para todo el dominio:
+
+- **El dinero va en `DecimalField`, nunca en `FloatField`.** Un float redondea y
+  el total de una orden queda mal.
+- Las reglas de integridad se declaran como `constraints` en el modelo, no solo
+  en el serializer: dos peticiones simultaneas se saltan una validacion que solo
+  vive en Python.
+- `on_delete` se elige a conciencia: `PROTECT` para lo que no se puede borrar si
+  ya se uso (cliente con ordenes, servicio ya cobrado), `CASCADE` para lo que no
+  existe sin su padre (prendas de una orden).
 
 ## Como se comunican frontend y backend
 
