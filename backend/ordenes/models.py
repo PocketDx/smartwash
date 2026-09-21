@@ -3,9 +3,10 @@ from django.db import models
 
 from catalogo.models import Servicio
 from clientes.models import Cliente
+from core.models import ModeloConAutoria
 
 
-class Orden(models.Model):
+class Orden(ModeloConAutoria):
     """Orden de servicio de un cliente (EP04, EP05).
 
     T2 / SCRUM-51 crea solo la estructura. Quedan para sus historias:
@@ -46,8 +47,6 @@ class Orden(models.Model):
 
     total = models.DecimalField(max_digits=12, decimal_places=2, default=0)
 
-    creado_en = models.DateTimeField(auto_now_add=True)
-    actualizado_en = models.DateTimeField(auto_now=True)
 
     class Meta:
         # Django pluriza "Orden" como "Ordens" en el admin.
@@ -64,7 +63,7 @@ class Orden(models.Model):
         return f"{self.codigo} - {self.cliente}"
 
 
-class Prenda(models.Model):
+class Prenda(ModeloConAutoria):
     """Prenda incluida en una orden (EP04)."""
 
     orden = models.ForeignKey(
@@ -82,8 +81,6 @@ class Prenda(models.Model):
     # HU18: el operario anota lo que detecta en la prenda.
     observaciones = models.TextField(blank=True)
 
-    creado_en = models.DateTimeField(auto_now_add=True)
-    actualizado_en = models.DateTimeField(auto_now=True)
 
     class Meta:
         ordering = ("id",)

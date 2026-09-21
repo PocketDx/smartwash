@@ -1,15 +1,15 @@
 from django.db import models
 
+from core.models import ModeloConAutoria
 
-class Servicio(models.Model):
+
+class Servicio(ModeloConAutoria):
     """Servicio que ofrece la lavanderia: lavado, planchado, lavado en seco (EP03)."""
 
     nombre = models.CharField(max_length=80, unique=True)
     descripcion = models.TextField(blank=True)
     activo = models.BooleanField(default=True)
 
-    creado_en = models.DateTimeField(auto_now_add=True)
-    actualizado_en = models.DateTimeField(auto_now=True)
 
     class Meta:
         ordering = ("nombre",)
@@ -18,7 +18,7 @@ class Servicio(models.Model):
         return self.nombre
 
 
-class Tarifa(models.Model):
+class Tarifa(ModeloConAutoria):
     """Precio vigente de un servicio (EP03).
 
     Un servicio tiene varias tarifas a lo largo del tiempo en vez de un solo
@@ -43,8 +43,6 @@ class Tarifa(models.Model):
         null=True, blank=True, help_text="Vacio = sigue vigente."
     )
 
-    creado_en = models.DateTimeField(auto_now_add=True)
-    actualizado_en = models.DateTimeField(auto_now=True)
 
     class Meta:
         ordering = ("servicio__nombre", "-vigente_desde")

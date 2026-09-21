@@ -41,6 +41,27 @@ git switch -c feature/nombre-corto   # o fix/nombre-corto
   generan entre ramas.
 - No toques `plot.md` ni `AGENTS.md` salvo que tu cambio invalide algo que dicen.
 
+## Comentarios
+
+El objetivo es que el codigo se lea como escrito por una persona, no anotado por
+una maquina. **Menos comentarios, mejor codigo.**
+
+- Un comentario se justifica cuando explica **por que**, no **que**. Si describe
+  lo que la linea siguiente ya dice, sobra.
+- Nada de comentarios que repiten el nombre del campo, la funcion o la clase.
+- Docstrings solo donde aportan: una clase con una regla de negocio no evidente,
+  si; un `__str__` o un getter, no.
+- No cites el ticket de Jira en cada campo. El ticket va en el mensaje del commit
+  y en el PR, que es donde alguien lo va a buscar.
+- Sin banners, separadores ASCII ni encabezados de seccion.
+- Si necesitas tres lineas de comentario para explicar un bloque, el problema es
+  el bloque: dale un nombre mejor o sacalo a una funcion.
+- El nombre de una prueba es su documentacion. Una prueba bien nombrada no lleva
+  docstring.
+
+Lo que si vale la pena comentar: una decision contraintuitiva que alguien
+intentaria "arreglar" sin saber por que esta asi.
+
 ## Convenciones que debes respetar
 
 - Backend: una app de Django por dominio. Rutas de la API **sin barra final**.
