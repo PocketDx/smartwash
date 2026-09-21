@@ -4,40 +4,23 @@ from core.models import ModeloConAutoria
 
 
 class Cliente(ModeloConAutoria):
-    """Cliente de la lavanderia (EP02).
+    class Clasificacion(models.TextChoices):
+        OCASIONAL = "Ocasional", "Ocasional"
+        FRECUENTE = "Frecuente", "Frecuente"
+        VIP = "VIP", "VIP"
 
-    T2 / SCRUM-51: solo la estructura y la integridad. El CRUD es HU05.
-    """
-
-    class TipoDocumento(models.TextChoices):
-        CEDULA_CIUDADANIA = "CC", "Cedula de ciudadania"
-        CEDULA_EXTRANJERIA = "CE", "Cedula de extranjeria"
-        PASAPORTE = "PA", "Pasaporte"
-        NIT = "NIT", "NIT"
-
-    tipo_documento = models.CharField(
-        max_length=3, choices=TipoDocumento.choices, default=TipoDocumento.CEDULA_CIUDADANIA
+    nombre_completo = models.CharField(max_length=150)
+    documento = models.CharField(max_length=20, unique=True)
+    telefono = models.CharField(max_length=20)
+    correo = models.EmailField(max_length=150, blank=True)
+    clasificacion = models.CharField(
+        max_length=30,
+        choices=Clasificacion.choices,
+        default=Clasificacion.OCASIONAL,
     )
-    documento = models.CharField(max_length=20)
-    nombres = models.CharField(max_length=80)
-    apellidos = models.CharField(max_length=80, blank=True)
-    telefono = models.CharField(max_length=20, blank=True)
-    email = models.EmailField(blank=True)
-    direccion = models.CharField(max_length=160, blank=True)
-    activo = models.BooleanField(default=True)
-
 
     class Meta:
-        ordering = ("apellidos", "nombres")
-        constraints = [
-            # HU05: "El documento de identidad es unico por cliente". Se valida
-            # en la base y no solo en el serializer, para que dos peticiones
-            # simultaneas no creen el mismo cliente dos veces.
-            models.UniqueConstraint(
-                fields=("tipo_documento", "documento"),
-                name="cliente_documento_unico",
-            )
-        ]
+        ordering = ("nombre_completo",)
 
     def __str__(self):
-        return f"{self.nombres} {self.apellidos}".strip() or self.documento
+        return f"{self.nombre_completo} ({self.documento})"
