@@ -1,4 +1,4 @@
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError
 from django.test import TestCase
 
 from .models import Cliente
@@ -6,21 +6,16 @@ from .models import Cliente
 
 class ClienteTests(TestCase):
     def test_no_admite_dos_clientes_con_el_mismo_documento(self):
-        """HU05: el documento de identidad es unico por cliente."""
-        Cliente.objects.create(documento="1090123456", nombres="Ana")
-        with self.assertRaises(IntegrityError):
-            Cliente.objects.create(documento="1090123456", nombres="Otro")
-
-    def test_el_mismo_numero_con_otro_tipo_de_documento_si_es_otro_cliente(self):
         Cliente.objects.create(
-            documento="900123456",
-            tipo_documento=Cliente.TipoDocumento.CEDULA_CIUDADANIA,
-            nombres="Ana",
+            documento="1090123456", nombre_completo="Ana Gomez", telefono="3001112233"
         )
-        with transaction.atomic():
+        with self.assertRaises(IntegrityError):
             Cliente.objects.create(
-                documento="900123456",
-                tipo_documento=Cliente.TipoDocumento.NIT,
-                nombres="Lavanderia SAS",
+                documento="1090123456", nombre_completo="Otro", telefono="3004445566"
             )
-        self.assertEqual(Cliente.objects.count(), 2)
+
+    def test_nace_clasificado_como_ocasional(self):
+        cliente = Cliente.objects.create(
+            documento="1090123456", nombre_completo="Ana Gomez", telefono="3001112233"
+        )
+        self.assertEqual(cliente.clasificacion, Cliente.Clasificacion.OCASIONAL)

@@ -2,23 +2,29 @@ from django.contrib import admin
 
 from core.admin import AutoriaAdminMixin
 
-from .models import Servicio, Tarifa
+from .models import Servicio, TipoPrenda, Tarifa
 
 
-class TarifaInline(admin.TabularInline):
-    model = Tarifa
-    extra = 0
+@admin.register(TipoPrenda)
+class TipoPrendaAdmin(AutoriaAdminMixin):
+    list_display = ("nombre", "material")
+    search_fields = ("nombre", "material")
 
 
 @admin.register(Servicio)
 class ServicioAdmin(AutoriaAdminMixin):
-    list_display = ("nombre", "activo")
-    list_filter = ("activo",)
+    list_display = ("nombre", "descripcion")
     search_fields = ("nombre",)
-    inlines = [TarifaInline]
 
 
 @admin.register(Tarifa)
 class TarifaAdmin(AutoriaAdminMixin):
-    list_display = ("servicio", "valor", "unidad", "vigente_desde", "vigente_hasta")
-    list_filter = ("unidad", "servicio")
+    list_display = (
+        "tipo_prenda",
+        "servicio",
+        "valor",
+        "plazo_entrega_dias",
+        "vigente_desde",
+        "vigente_hasta",
+    )
+    list_filter = ("servicio", "tipo_prenda")

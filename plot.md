@@ -65,13 +65,21 @@ No crees apps vacias "para despues".
 
 ### Modelo de datos
 
+Sigue el modelo relacional acordado por el equipo. Solo estan las entidades
+nucleo (T2); el resto de tablas del modelo entra con su historia.
+
 | Modelo | App | Notas |
 |--------|-----|-------|
-| `Cliente` | clientes | `(tipo_documento, documento)` unico (HU05) |
-| `Servicio` | catalogo | Nombre unico |
-| `Tarifa` | catalogo | Historica: un servicio acumula tarifas en vez de un precio mutable, para que cambiar el precio hoy no altere las ordenes de ayer |
-| `Orden` | ordenes | `codigo` unico y publico (HU17). `total` y `entrega_estimada` se calculan en HU09; el flujo de estados es HU14 |
-| `Prenda` | ordenes | `valor_unitario` se copia de la tarifa al registrar, no se lee de `Tarifa` |
+| `Cliente` | clientes | `documento` unico. `clasificacion` la actualiza RF38 |
+| `TipoPrenda` | catalogo | Camisa, pantalon, cobija. La tarifa depende de esto |
+| `Servicio` | catalogo | Lavado, planchado, lavado en seco |
+| `Tarifa` | catalogo | Por `(tipo_prenda, servicio)`, con vigencia. Una sola vigente por par |
+| `Orden` | ordenes | `codigo` unico y publico. `operario` es nulo hasta HU10 |
+| `Prenda` | ordenes | Pertenece a una orden y tiene un `TipoPrenda` |
+| `OrdenServicio` | ordenes | Que servicios recibe cada prenda, con `valor_aplicado` congelado |
+
+Una prenda puede recibir **varios servicios**: una camisa va a lavado y a
+planchado. Por eso existe `OrdenServicio` y no un FK directo.
 
 Todo modelo de dominio hereda de `core.models.ModeloConAutoria`, que agrega
 `creado_por` / `actualizado_por` ademas de los timestamps (T3). **Cada vista que
@@ -85,46 +93,15 @@ Reglas que valen para todo el dominio:
 
 - **El dinero va en `DecimalField`, nunca en `FloatField`.** Un float redondea y
   el total de una orden queda mal.
+- **Los precios no se releen, se congelan.** `OrdenServicio.valor_aplicado` copia
+  el valor de la tarifa al registrar la orden. Si manana sube el precio, lo ya
+  cobrado no cambia.
 - Las reglas de integridad se declaran como `constraints` en el modelo, no solo
   en el serializer: dos peticiones simultaneas se saltan una validacion que solo
   vive en Python.
 - `on_delete` se elige a conciencia: `PROTECT` para lo que no se puede borrar si
-  ya se uso (cliente con ordenes, servicio ya cobrado), `CASCADE` para lo que no
-  existe sin su padre (prendas de una orden).
-
-## Como se comunican frontend y backend
-
-El navegador **nunca** llama a Django directamente. `frontend/next.config.ts`
-reenvia `/api/:path*` al backend (`BACKEND_URL`):
-
-```
-navegador  ──>  Next.js (:3000)  ──rewrite──>  Django (:8000)
-```
-
-Consecuencias, que hay que respetar al agregar endpoints:
-
-- La cookie de sesion es **first-party** del origen de Next. No hay CORS ni
-  `SameSite=None`. No agregues `django-cors-headers`.
-- Django si ve el header `Origin` del frontend, por eso necesita
-  `DJANGO_CSRF_TRUSTED_ORIGINS`.
-- **Las rutas de la API van sin barra final** (`/api/auth/login`, no
-  `/api/auth/login/`). Next 16 responde 308 y elimina la barra antes del rewrite,
-  lo que rompe los POST. El admin de Django (`/admin/`) no pasa por el rewrite y
-  conserva su barra.
-- Peticiones de escritura desde el navegador requieren el header `X-CSRFToken`.
-  `lib/api.ts` ya lo resuelve: usalo en lugar de `fetch` directo.
-
-## Endpoints existentes
-
-| Metodo | Ruta | Permiso | Que hace |
-|--------|------|---------|----------|
-| GET  | `/api/health`       | publico | Verifica app + base de datos |
-| POST | `/api/auth/login`   | publico | Crea la sesion. Requiere CSRF |
-| POST | `/api/auth/logout`  | sesion  | Cierra la sesion |
-| GET  | `/api/auth/me`      | sesion  | Usuario actual. Siembra la cookie `csrftoken` |
-
-`/api/auth/me` responde **403** si no hay sesion; el frontend lo interpreta como
-"no autenticado".
+  ya se uso (cliente con ordenes, tarifa ya cobrada), `CASCADE` para lo que no
+  existe sin su padre (prendas de una orden), `SET_NULL` para el operario.
 
 ## Convenciones
 

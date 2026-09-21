@@ -22,7 +22,9 @@ class AutoriaTests(TestCase):
         self.beto = User.objects.create_user(username="beto", password="x")
 
     def crear_cliente(self, usuario):
-        cliente = Cliente(documento="1", nombres="Cliente")
+        cliente = Cliente(
+            documento="1", nombre_completo="Cliente", telefono="3001112233"
+        )
         cliente.registrar_autoria(usuario)
         cliente.save()
         return cliente
@@ -36,7 +38,7 @@ class AutoriaTests(TestCase):
     def test_al_modificar_cambia_actualizado_por_pero_no_creado_por(self):
         cliente = self.crear_cliente(self.ana)
 
-        cliente.nombres = "Otro nombre"
+        cliente.nombre_completo = "Otro nombre"
         cliente.registrar_autoria(self.beto)
         cliente.save()
         cliente.refresh_from_db()
