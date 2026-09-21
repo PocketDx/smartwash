@@ -73,6 +73,14 @@ No crees apps vacias "para despues".
 | `Orden` | ordenes | `codigo` unico y publico (HU17). `total` y `entrega_estimada` se calculan en HU09; el flujo de estados es HU14 |
 | `Prenda` | ordenes | `valor_unitario` se copia de la tarifa al registrar, no se lee de `Tarifa` |
 
+Todo modelo de dominio hereda de `core.models.ModeloConAutoria`, que agrega
+`creado_por` / `actualizado_por` ademas de los timestamps (T3). **Cada vista que
+escriba debe llamar a `registrar_autoria(request.user)` antes de `save()`**; el
+Django Admin ya lo hace via `core.admin.AutoriaAdminMixin`.
+
+Las cuatro cuentas de prueba se crean con `manage.py seed_usuarios` (ver README).
+El comando se niega a correr con `DEBUG=False`.
+
 Reglas que valen para todo el dominio:
 
 - **El dinero va en `DecimalField`, nunca en `FloatField`.** Un float redondea y

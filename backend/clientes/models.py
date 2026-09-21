@@ -1,7 +1,9 @@
 from django.db import models
 
+from core.models import ModeloConAutoria
 
-class Cliente(models.Model):
+
+class Cliente(ModeloConAutoria):
     """Cliente de la lavanderia (EP02).
 
     T2 / SCRUM-51: solo la estructura y la integridad. El CRUD es HU05.
@@ -24,8 +26,6 @@ class Cliente(models.Model):
     direccion = models.CharField(max_length=160, blank=True)
     activo = models.BooleanField(default=True)
 
-    creado_en = models.DateTimeField(auto_now_add=True)
-    actualizado_en = models.DateTimeField(auto_now=True)
 
     class Meta:
         ordering = ("apellidos", "nombres")

@@ -1,5 +1,7 @@
 from django.contrib import admin
 
+from core.admin import AutoriaAdminMixin
+
 from .models import Servicio, Tarifa
 
 
@@ -9,7 +11,7 @@ class TarifaInline(admin.TabularInline):
 
 
 @admin.register(Servicio)
-class ServicioAdmin(admin.ModelAdmin):
+class ServicioAdmin(AutoriaAdminMixin):
     list_display = ("nombre", "activo")
     list_filter = ("activo",)
     search_fields = ("nombre",)
@@ -17,6 +19,6 @@ class ServicioAdmin(admin.ModelAdmin):
 
 
 @admin.register(Tarifa)
-class TarifaAdmin(admin.ModelAdmin):
+class TarifaAdmin(AutoriaAdminMixin):
     list_display = ("servicio", "valor", "unidad", "vigente_desde", "vigente_hasta")
     list_filter = ("unidad", "servicio")
