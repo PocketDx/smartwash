@@ -288,5 +288,45 @@ frontend no se cae, simplemente no tiene con quien hablar.
 
 ### Backend
 
-El backend **no** se despliega en Vercel. Lo pendiente para llevarlo a
-produccion con PostgreSQL esta en la seccion *Pendiente* de [plot.md](plot.md).
+El backend **no** se despliega en Vercel, y **la plataforma todavia no se ha
+elegido**. El codigo ya esta preparado para cualquier PaaS:
+
+| Pieza | Para que |
+|-------|----------|
+| `gunicorn` | Servidor WSGI de produccion |
+| `whitenoise` | Sirve los estaticos del admin sin un CDN aparte |
+| `psycopg[binary]` | Driver de PostgreSQL |
+| `dj-database-url` | Basta definir `DATABASE_URL` para apuntar a Postgres |
+
+Comandos que espera cualquier plataforma:
+
+```bash
+# build
+pip install -r requirements.txt && python manage.py collectstatic --no-input && python manage.py migrate
+# arranque
+gunicorn config.wsgi:application
+```
+
+Variables obligatorias en produccion: `DJANGO_SECRET_KEY`, `DJANGO_DEBUG=False`,
+`DJANGO_ALLOWED_HOSTS`, `DJANGO_CSRF_TRUSTED_ORIGINS` y `DATABASE_URL`.
+
+> Con `DEBUG=False`, arrancar sin `DJANGO_SECRET_KEY` **falla a proposito**. Sin
+> ella las sesiones y los tokens CSRF serian falsificables, asi que preferimos
+> que el despliegue no arranque a que arranque inseguro.
+
+El detalle de lo que falta esta en la seccion *Pendiente* de [plot.md](plot.md).
+
+---
+
+## Integracion continua
+
+`.github/workflows/ci.yml` corre en cada Pull Request a `dev` y a `main`:
+
+| Job | Que verifica |
+|-----|--------------|
+| Backend | Que no falten migraciones y que pasen las pruebas de Django |
+| Frontend | `npm run lint` y `npm run build`, que incluye el chequeo de tipos |
+
+Son los mismos comandos que corres en local, asi que si te pasan a ti, pasan en CI.
+
+No hay despliegue automatico del backend todavia: depende de elegir la plataforma.

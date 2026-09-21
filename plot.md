@@ -108,12 +108,21 @@ Consecuencias, que hay que respetar al agregar endpoints:
 - Variables de entorno: toda variable nueva se documenta en el `.env.example`
   correspondiente. Nunca se commitea un `.env` real.
 
-## Pruebas
+## Pruebas e integracion continua
 
 ```bash
 cd backend && .venv/bin/python manage.py test     # macOS / Linux
 cd backend && .venv\Scripts\python manage.py test # Windows
 ```
+
+`.github/workflows/ci.yml` corre en cada PR a `dev` y a `main`:
+
+| Job | Que verifica |
+|-----|--------------|
+| Backend | Que no falten migraciones (`makemigrations --check`) y que pasen las pruebas |
+| Frontend | `npm run lint` y `npm run build`, que incluye el chequeo de tipos |
+
+No hay despliegue automatico del backend porque la plataforma aun no se elige.
 
 Runner nativo de Django (`django.test`), sin pytest. Cada historia se cierra con
 la prueba de sus escenarios de aceptacion (T7 / SCRUM-54). El frontend no tiene
@@ -137,12 +146,23 @@ pruebas unitarias: se valida con pruebas funcionales.
 
 **Infraestructura**
 
-- Desplegar el backend: Vercel hospeda Next.js, **no** Django. Falta elegir
-  destino (Render, Railway, Fly.io o similar), aprovisionar PostgreSQL gestionado,
-  definir `DATABASE_URL`, `DJANGO_SECRET_KEY`, `DJANGO_DEBUG=False`,
-  `DJANGO_ALLOWED_HOSTS` y `DJANGO_CSRF_TRUSTED_ORIGINS` con el dominio de Vercel,
-  agregar `psycopg[binary]` a `requirements.txt`, servir estaticos del admin
-  (WhiteNoise) y apuntar `BACKEND_URL` en Vercel al backend desplegado.
+- **Decision pendiente: donde se despliega el backend.** Vercel hospeda Next.js,
+  **no** Django. El codigo ya esta listo para cualquier PaaS (gunicorn, WhiteNoise,
+  `psycopg`, `DATABASE_URL`), pero la plataforma no se ha elegido. Hasta que se
+  elija no hay CD del backend: el CI solo corre pruebas.
+
+  Lo que hara falta el dia que se decida:
+  - Aprovisionar PostgreSQL y definir `DATABASE_URL`.
+  - Definir `DJANGO_SECRET_KEY`, `DJANGO_DEBUG=False`, `DJANGO_ALLOWED_HOSTS` con
+    el dominio del backend y `DJANGO_CSRF_TRUSTED_ORIGINS` con el de Vercel.
+  - Build: `pip install -r requirements.txt && python manage.py collectstatic
+    --no-input && python manage.py migrate`. Arranque: `gunicorn config.wsgi:application`.
+  - Apuntar `BACKEND_URL` en Vercel al backend desplegado (y redesplegar, porque
+    se lee en build time).
+
+  Nota para la eleccion: el Postgres gratuito de Render **expira a los 30 dias** y
+  se borra a los 44, lo que no cubre un semestre. Si se elige Render, conviene la
+  base en otro proveedor con plan gratuito permanente.
 - **`BACKEND_URL` todavia no esta definida en Vercel.** Hasta que exista un
   backend publico al que apuntar, el frontend desplegado no puede autenticar:
   `/` redirige a `/login` y el login avisa que no hay conexion. Es degradacion

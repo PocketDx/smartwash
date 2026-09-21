@@ -2,5 +2,9 @@ Django==6.1.1
 djangorestframework==3.18.1
 python-dotenv==1.2.3
 dj-database-url==3.1.2
-# PostgreSQL: descomentar al migrar desde SQLite (ver plot.md)
-# psycopg[binary]==3.2.9
+
+# Produccion. En local no estorban: gunicorn no se usa con runserver y
+# whitenoise solo actua cuando DEBUG=False.
+gunicorn==26.2.0
+whitenoise==6.12.0
+psycopg[binary]==3.3.6

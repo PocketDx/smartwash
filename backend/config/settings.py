@@ -7,6 +7,7 @@ ponytail: sin split base/dev/prod; el unico eje que varia hoy es DEBUG.
 from pathlib import Path
 
 import dj_database_url
+from django.core.exceptions import ImproperlyConfigured
 from dotenv import load_dotenv
 import os
 
@@ -18,9 +19,16 @@ def env_list(name, default=""):
     return [v.strip() for v in os.getenv(name, default).split(",") if v.strip()]
 
 
-SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "dev-insecure-cambiar-en-produccion")
+INSECURE_SECRET_KEY = "dev-insecure-cambiar-en-produccion"
+SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", INSECURE_SECRET_KEY)
 DEBUG = os.getenv("DJANGO_DEBUG", "True").lower() == "true"
 ALLOWED_HOSTS = env_list("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1")
+
+if not DEBUG and SECRET_KEY == INSECURE_SECRET_KEY:
+    raise ImproperlyConfigured(
+        "DJANGO_SECRET_KEY no esta definida. Con DEBUG=False es obligatoria: "
+        "sin ella las sesiones y los tokens CSRF serian falsificables."
+    )
 
 # El navegador habla con Next.js, que reenvia a Django via rewrite; el header
 # Origin sigue siendo el del frontend, asi que Django debe confiar en el.
@@ -42,6 +50,9 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    # Sirve los estaticos del admin en produccion; sin esto el admin se ve sin
+    # estilos en cualquier PaaS. No hace nada mientras DEBUG=True.
+    "whitenoise.middleware.WhiteNoiseMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
@@ -102,6 +113,12 @@ USE_TZ = True
 
 STATIC_URL = "static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
+STORAGES = {
+    "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+    "staticfiles": {
+        "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage"
+    },
+}
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 # En produccion el frontend y el backend viven en dominios distintos.
