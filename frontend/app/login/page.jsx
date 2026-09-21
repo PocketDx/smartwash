@@ -16,13 +16,22 @@ export default function LoginPage() {
     setError(null);
 
     const form = new FormData(event.currentTarget);
-    const response = await api("/auth/login", {
-      method: "POST",
-      body: {
-        username: form.get("username"),
-        password: form.get("password"),
-      },
-    });
+
+    let response;
+    try {
+      response = await api("/auth/login", {
+        method: "POST",
+        body: {
+          username: form.get("username"),
+          password: form.get("password"),
+        },
+      });
+    } catch {
+      // El backend no responde: sin esto el boton se queda en "Ingresando...".
+      setError("No hay conexion con el servidor. Intentalo de nuevo.");
+      setPending(false);
+      return;
+    }
 
     if (response.ok) {
       router.replace("/");

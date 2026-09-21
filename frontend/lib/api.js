@@ -31,12 +31,21 @@ export async function api(path, { method = "GET", body } = {}) {
   });
 }
 
-/** Usuario autenticado leido desde un Server Component, o null si no hay sesion. */
+/** Usuario autenticado leido desde un Server Component, o null si no hay sesion.
+ *
+ * Devuelve null tambien si el backend no responde. Sin esto, un Django caido
+ * hace que fetch lance y la pagina entera falle con 500; asi el usuario cae en
+ * /login, que al menos es una pantalla util.
+ */
 export async function getCurrentUser(cookieStore) {
   const backend = process.env.BACKEND_URL ?? "http://127.0.0.1:8000";
-  const response = await fetch(`${backend}/api/auth/me`, {
-    headers: { cookie: cookieStore.toString() },
-    cache: "no-store",
-  });
-  return response.ok ? response.json() : null;
+  try {
+    const response = await fetch(`${backend}/api/auth/me`, {
+      headers: { cookie: cookieStore.toString() },
+      cache: "no-store",
+    });
+    return response.ok ? response.json() : null;
+  } catch {
+    return null;
+  }
 }

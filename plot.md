@@ -142,6 +142,11 @@ pruebas unitarias: se valida con pruebas funcionales.
   `DJANGO_ALLOWED_HOSTS` y `DJANGO_CSRF_TRUSTED_ORIGINS` con el dominio de Vercel,
   agregar `psycopg[binary]` a `requirements.txt`, servir estaticos del admin
   (WhiteNoise) y apuntar `BACKEND_URL` en Vercel al backend desplegado.
+- **`BACKEND_URL` todavia no esta definida en Vercel.** Hasta que exista un
+  backend publico al que apuntar, el frontend desplegado no puede autenticar:
+  `/` redirige a `/login` y el login avisa que no hay conexion. Es degradacion
+  controlada, no un fallo. El detalle de la configuracion de Vercel esta en el
+  README; no hay `vercel.json` porque todo vive en el panel.
 - Recuperacion de contrasena por correo (HU02): falta backend de email.
 - Expiracion de sesion por inactividad y control de acceso por rol (T8/SCRUM-57).
 
