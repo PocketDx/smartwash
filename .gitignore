@@ -15,6 +15,10 @@ out/
 build/
 .vercel
 
+# TypeScript: next-env.d.ts lo regenera Next en cada build
+next-env.d.ts
+*.tsbuildinfo
+
 # Variables de entorno: se ignoran salvo los ejemplos versionados
 .env
 .env.*
