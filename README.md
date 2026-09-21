@@ -258,7 +258,28 @@ Si trabajas con un agente de IA, pasale [AGENTS.md](AGENTS.md).
 
 ## Despliegue
 
-El frontend esta preparado para **Vercel** (define `BACKEND_URL` en las variables
-de entorno del proyecto). El backend **no** se despliega en Vercel: lo pendiente
-para llevarlo a produccion con PostgreSQL esta en la seccion *Pendiente* de
-[plot.md](plot.md).
+### Vercel (frontend)
+
+El proyecto de Vercel ya esta conectado al repositorio y despliega `main`
+automaticamente. La configuracion vive en el panel de Vercel, no en el
+repositorio: **no hay `vercel.json` y no hace falta**.
+
+Dos ajustes en **Settings** del proyecto de Vercel:
+
+| Ajuste | Valor | Por que |
+|--------|-------|---------|
+| **Root Directory** | `frontend` | La app de Next no esta en la raiz del repo. Ya esta puesto |
+| **Environment Variables** → `BACKEND_URL` | URL publica del backend | Sin esto el rewrite apunta a `http://127.0.0.1:8000`, que en Vercel no existe |
+
+> **`BACKEND_URL` se lee en tiempo de build**, porque `next.config.mjs` la usa
+> para construir el rewrite. Cambiarla en Vercel **exige un redeploy**; no basta
+> con reiniciar.
+
+Mientras el backend no este desplegado, `/` redirige a `/login` y el login
+responde "No hay conexion con el servidor". Es el comportamiento esperado: el
+frontend no se cae, simplemente no tiene con quien hablar.
+
+### Backend
+
+El backend **no** se despliega en Vercel. Lo pendiente para llevarlo a
+produccion con PostgreSQL esta en la seccion *Pendiente* de [plot.md](plot.md).

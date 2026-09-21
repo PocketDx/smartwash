@@ -8,7 +8,8 @@ export default function LogoutButton() {
   const router = useRouter();
 
   async function logout() {
-    await api("/auth/logout", { method: "POST" });
+    // Si el backend no responde igual sacamos al usuario de la pantalla privada.
+    await api("/auth/logout", { method: "POST" }).catch(() => {});
     router.replace("/login");
     router.refresh();
   }
