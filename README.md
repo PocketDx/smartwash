@@ -3,7 +3,7 @@
 Sistema web de gestion operativa y fidelizacion para lavanderias.
 Proyecto academico 🚧 en desarrollo.
 
-- Backend: **Django 6 + Django REST Framework** (SQLite en local)
+- Backend: **Django 6 + Django REST Framework** (SQLite en local, ver [La base de datos](#la-base-de-datos))
 - Frontend: **Next.js 16 (App Router, TypeScript)**
 - Autenticacion: **sesiones de Django + cookies**
 
@@ -93,6 +93,9 @@ SQLite se crea sola: basta con migrar.
 ```bash
 python manage.py migrate
 ```
+
+El archivo queda en `backend/db.sqlite3` y **no se sube al repositorio**. Si te
+preguntas por que, esta explicado en [La base de datos](#la-base-de-datos).
 
 ### 2.4 Crear las cuentas de prueba
 
@@ -269,6 +272,94 @@ Reglas:
 Cuando `dev` esta estable, se abre un PR `dev` -> `main` para publicar.
 
 Si trabajas con un agente de IA, pasale [AGENTS.md](AGENTS.md).
+
+---
+
+## La base de datos
+
+En desarrollo usamos **SQLite**. El archivo `backend/db.sqlite3` lo genera
+`migrate` en tu maquina y esta en el `.gitignore` a proposito.
+
+### Por que no se versiona
+
+**Git no sabe fusionar binarios.** Si dos personas commitean su base, al mergear
+git responde `Cannot merge binary files` y toca escoger un lado completo. El
+archivo no se dana, pero los datos del otro desaparecen sin que nadie se entere.
+
+**Contiene credenciales.** Ahi viven las cuentas de prueba con sus hashes de
+contrasena. No es algo que se publique.
+
+**Engorda el repositorio.** Cada commit guarda una copia entera del binario, no
+solo lo que cambio.
+
+Lo que si se versiona son las **migraciones**. Ellas son la fuente de verdad del
+esquema: con `migrate` cualquiera reconstruye la misma estructura. Si tu base
+local se dana o se desordena, borrala y empieza de nuevo:
+
+```bash
+rm backend/db.sqlite3
+python manage.py migrate
+python manage.py seed_usuarios
+```
+
+### Datos de prueba compartidos
+
+Como la base no se comparte, **los datos de prueba se comparten en codigo**. Un
+comando de gestion que cualquiera corre y deja su base igual a la de los demas.
+
+Ya existe uno, `seed_usuarios`, y el patron se repite para lo que haga falta.
+Segun vayan entrando las historias tendra sentido agregar, por ejemplo:
+
+| Comando | Que sembraria |
+|---------|---------------|
+| `seed_catalogo` | Tipos de prenda y servicios con sus tarifas |
+| `seed_clientes` | Unos cuantos clientes para no inventarlos a mano |
+| `seed_ordenes` | Ordenes de ejemplo en distintos estados, para probar el flujo |
+
+Crear uno son pocas lineas. Va en
+`backend/<app>/management/commands/<nombre>.py`:
+
+```python
+class Command(BaseCommand):
+    help = "Siembra el catalogo de servicios para desarrollo."
+
+    @transaction.atomic
+    def handle(self, *args, **options):
+        if not settings.DEBUG:
+            raise CommandError("Solo para desarrollo.")
+        for nombre in ("Lavado", "Planchado", "Lavado en seco"):
+            Servicio.objects.get_or_create(nombre=nombre)
+```
+
+Lo mas facil es copiar `accounts/management/commands/seed_usuarios.py`, que ya
+trae lo importante: usa `get_or_create`, asi que correrlo dos veces no duplica
+nada, y se niega a correr con `DEBUG=False`.
+
+Tiene dos ventajas sobre pasarse el archivo por WhatsApp: los datos quedan
+versionados y se revisan en un PR como cualquier otro codigo, y cuando alguien
+agrega un campo nuevo actualiza el seed en el mismo cambio.
+
+### Cuando pasemos a PostgreSQL
+
+No hay que tocar codigo. El proyecto usa `dj-database-url`, asi que basta definir
+`DATABASE_URL` en el `.env`:
+
+```bash
+DATABASE_URL=postgres://usuario:clave@host:5432/smartwash
+```
+
+Django aplica las mismas migraciones sobre PostgreSQL y listo. `psycopg` ya esta
+en `requirements.txt`.
+
+Dos cosas que conviene saber antes de hacerlo:
+
+- **Los datos no viajan solos.** El esquema se recrea con `migrate`, pero lo que
+  tengas en tu SQLite local se queda ahi. En desarrollo no importa, porque los
+  seeds lo vuelven a sembrar.
+- **SQLite es mas permisivo que PostgreSQL.** Una consulta que funciona en local
+  puede fallar contra PostgreSQL, sobre todo con mayusculas y minusculas en las
+  busquedas de texto. Por eso conviene desplegar temprano y no dejar el cambio
+  para el final.
 
 ---
 
