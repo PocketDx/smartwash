@@ -94,17 +94,37 @@ SQLite se crea sola: basta con migrar.
 python manage.py migrate
 ```
 
-### 2.4 Crear un superusuario
+### 2.4 Crear las cuentas de prueba
+
+El equipo comparte cuatro cuentas para desarrollo:
+
+```bash
+python manage.py seed_usuarios
+```
+
+| Usuario | Rol | Entra al Django Admin |
+|---------|-----|----------------------|
+| `admin` | administrador | si |
+| `recepcion` | recepcionista | no |
+| `operario1` | operario | no |
+| `operario2` | operario | no |
+
+Clave para las cuatro: `smartwash123`. Se puede cambiar con `--password`.
+
+> El comando **se niega a correr con `DEBUG=False`**. Son cuentas con clave
+> publicada; en produccion serian cuatro puertas abiertas. Correrlo dos veces no
+> duplica nada, pero **si reescribe las claves** de esos cuatro usuarios.
+
+En este sprint todavia **no hay control de acceso por rol**: las cuatro cuentas
+pueden hacer todo. El enforcement es T8.
+
+Si prefieres tu propia cuenta:
 
 ```bash
 python manage.py createsuperuser
 ```
 
-Asignale el rol de administrador desde el admin de Django (paso 2.6) o asi:
-
-```bash
-python manage.py shell -c "from django.contrib.auth import get_user_model; U=get_user_model(); u=U.objects.get(username='TU_USUARIO'); u.rol=U.Rol.ADMINISTRADOR; u.save()"
-```
+Asignale el rol desde el Django Admin (paso 2.6).
 
 ### 2.5 Iniciar Django
 
@@ -116,7 +136,7 @@ Queda en http://127.0.0.1:8000.
 
 ### 2.6 Django Admin
 
-http://127.0.0.1:8000/admin/ — entra con el superusuario del paso 2.4.
+http://127.0.0.1:8000/admin/ — entra con `admin` (paso 2.4).
 
 ---
 
@@ -158,7 +178,7 @@ Queda en http://localhost:3000.
 Con **ambos servidores corriendo**:
 
 1. Abre http://localhost:3000 — debe redirigirte a `/login`.
-2. Entra con el superusuario del paso 2.4.
+2. Entra con `admin` (paso 2.4).
 3. Debes ver el dashboard con tu usuario y tu rol.
 4. Pulsa **Cerrar sesion** — vuelves a `/login`.
 

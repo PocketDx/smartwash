@@ -41,6 +41,9 @@ smartwash/
 │   ├── config/          # settings.py (unico, por entorno), urls.py, wsgi/asgi
 │   ├── accounts/        # modelo User con rol + endpoints de autenticacion
 │   ├── core/            # health check y utilidades transversales
+│   ├── clientes/        # Cliente (EP02)
+│   ├── catalogo/        # Servicio y Tarifa (EP03)
+│   ├── ordenes/         # Orden y Prenda (EP04, EP05)
 │   ├── manage.py
 │   ├── requirements.txt
 │   └── .env.example
@@ -54,44 +57,51 @@ smartwash/
 └── README.md            # como levantar el proyecto
 ```
 
-Cada dominio nuevo del backlog entra como **una app de Django** bajo `backend/`
-(`clientes/`, `catalogo/`, `ordenes/`, `pagos/`, `fidelizacion/`,
-`notificaciones/`). No existen todavia: se crean cuando se implemente su historia.
+Cada dominio nuevo del backlog entra como **una app de Django** bajo `backend/`.
+Ya existen `clientes/`, `catalogo/` y `ordenes/`, con sus modelos pero **sin
+endpoints**: T2 (SCRUM-51) pedia solo las entidades nucleo. Faltan `pagos/`,
+`fidelizacion/` y `notificaciones/`: se crean cuando se implemente su historia.
 No crees apps vacias "para despues".
 
-## Como se comunican frontend y backend
+### Modelo de datos
 
-El navegador **nunca** llama a Django directamente. `frontend/next.config.ts`
-reenvia `/api/:path*` al backend (`BACKEND_URL`):
+Sigue el modelo relacional acordado por el equipo. Solo estan las entidades
+nucleo (T2); el resto de tablas del modelo entra con su historia.
 
-```
-navegador  ──>  Next.js (:3000)  ──rewrite──>  Django (:8000)
-```
+| Modelo | App | Notas |
+|--------|-----|-------|
+| `Cliente` | clientes | `documento` unico. `clasificacion` la actualiza RF38 |
+| `TipoPrenda` | catalogo | Camisa, pantalon, cobija. La tarifa depende de esto |
+| `Servicio` | catalogo | Lavado, planchado, lavado en seco |
+| `Tarifa` | catalogo | Por `(tipo_prenda, servicio)`, con vigencia. Una sola vigente por par |
+| `Orden` | ordenes | `codigo` unico y publico. `operario` es nulo hasta HU10 |
+| `Prenda` | ordenes | Pertenece a una orden y tiene un `TipoPrenda` |
+| `OrdenServicio` | ordenes | Que servicios recibe cada prenda, con `valor_aplicado` congelado |
 
-Consecuencias, que hay que respetar al agregar endpoints:
+Una prenda puede recibir **varios servicios**: una camisa va a lavado y a
+planchado. Por eso existe `OrdenServicio` y no un FK directo.
 
-- La cookie de sesion es **first-party** del origen de Next. No hay CORS ni
-  `SameSite=None`. No agregues `django-cors-headers`.
-- Django si ve el header `Origin` del frontend, por eso necesita
-  `DJANGO_CSRF_TRUSTED_ORIGINS`.
-- **Las rutas de la API van sin barra final** (`/api/auth/login`, no
-  `/api/auth/login/`). Next 16 responde 308 y elimina la barra antes del rewrite,
-  lo que rompe los POST. El admin de Django (`/admin/`) no pasa por el rewrite y
-  conserva su barra.
-- Peticiones de escritura desde el navegador requieren el header `X-CSRFToken`.
-  `lib/api.ts` ya lo resuelve: usalo en lugar de `fetch` directo.
+Todo modelo de dominio hereda de `core.models.ModeloConAutoria`, que agrega
+`creado_por` / `actualizado_por` ademas de los timestamps (T3). **Cada vista que
+escriba debe llamar a `registrar_autoria(request.user)` antes de `save()`**; el
+Django Admin ya lo hace via `core.admin.AutoriaAdminMixin`.
 
-## Endpoints existentes
+Las cuatro cuentas de prueba se crean con `manage.py seed_usuarios` (ver README).
+El comando se niega a correr con `DEBUG=False`.
 
-| Metodo | Ruta | Permiso | Que hace |
-|--------|------|---------|----------|
-| GET  | `/api/health`       | publico | Verifica app + base de datos |
-| POST | `/api/auth/login`   | publico | Crea la sesion. Requiere CSRF |
-| POST | `/api/auth/logout`  | sesion  | Cierra la sesion |
-| GET  | `/api/auth/me`      | sesion  | Usuario actual. Siembra la cookie `csrftoken` |
+Reglas que valen para todo el dominio:
 
-`/api/auth/me` responde **403** si no hay sesion; el frontend lo interpreta como
-"no autenticado".
+- **El dinero va en `DecimalField`, nunca en `FloatField`.** Un float redondea y
+  el total de una orden queda mal.
+- **Los precios no se releen, se congelan.** `OrdenServicio.valor_aplicado` copia
+  el valor de la tarifa al registrar la orden. Si manana sube el precio, lo ya
+  cobrado no cambia.
+- Las reglas de integridad se declaran como `constraints` en el modelo, no solo
+  en el serializer: dos peticiones simultaneas se saltan una validacion que solo
+  vive en Python.
+- `on_delete` se elige a conciencia: `PROTECT` para lo que no se puede borrar si
+  ya se uso (cliente con ordenes, tarifa ya cobrada), `CASCADE` para lo que no
+  existe sin su padre (prendas de una orden), `SET_NULL` para el operario.
 
 ## Convenciones
 
