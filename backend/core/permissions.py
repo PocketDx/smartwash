@@ -10,3 +10,11 @@ class SoloAdministradorEscribe(BasePermission):
         if not request.user.is_authenticated:
             return False
         return request.method in SAFE_METHODS or request.user.rol == User.Rol.ADMINISTRADOR
+
+
+class AdministradorORecepcionista(BasePermission):
+    def has_permission(self, request, view):
+        return request.user.is_authenticated and request.user.rol in (
+            User.Rol.ADMINISTRADOR,
+            User.Rol.RECEPCIONISTA,
+        )

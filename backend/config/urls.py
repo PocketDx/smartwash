@@ -12,6 +12,7 @@ urlpatterns = [
     path("api/", include("core.urls")),
     path("api/", include("accounts.urls")),
     path("api/", include("clientes.urls")),
+    path("api/", include("ordenes.urls")),
     path("api/catalogo/", include("catalogo.urls")),
     path("api/fidelizacion/", include("fidelizacion.urls")),
     # Esquema OpenAPI
