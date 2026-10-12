@@ -13,7 +13,16 @@ from catalogo.models import Servicio, TipoPrenda, Tarifa
 from clientes.models import Cliente
 
 from .historial import OperacionNoCompletada, operacion_sobre_orden, registrar_evento
-from .models import HistorialOrden, Orden, OrdenServicio, Prenda
+from fidelizacion.models import ReglaDescuento
+
+from .models import (
+    HistorialOrden,
+    Orden,
+    OrdenServicio,
+    Prenda,
+    duracion_estimada_dias,
+    sumar_dias_habiles,
+)
 
 User = get_user_model()
 
@@ -57,8 +66,8 @@ class OrdenTests(TestCase):
                 recepcionista=self.recepcionista,
             )
 
-    def test_la_orden_nace_recibida_sin_operario_y_sin_pagar(self):
-        self.assertEqual(self.orden.estado, Orden.Estado.RECIBIDA)
+    def test_la_orden_nace_en_espera_sin_operario_y_sin_pagar(self):
+        self.assertEqual(self.orden.estado, Orden.Estado.EN_ESPERA)
         self.assertEqual(self.orden.estado_pago, Orden.EstadoPago.PENDIENTE)
         self.assertIsNone(self.orden.operario)
 
@@ -174,7 +183,7 @@ class RegistrarEventoTests(TestCase):
                 registrar_evento(orden, Evento.CAMBIO_ESTADO, orden.recepcionista)
 
         orden.refresh_from_db()
-        self.assertEqual(orden.estado, Orden.Estado.RECIBIDA)
+        self.assertEqual(orden.estado, Orden.Estado.EN_ESPERA)
         self.assertFalse(HistorialOrden.objects.exists())
         self.assertIn("sin conexion", "\n".join(logs.output))
         self.assertNotIn("sin conexion", str(error.exception.detail))
@@ -307,7 +316,7 @@ class HistorialDesdeAdminTests(TestCase):
                 (Evento.ASIGNACION, "sin operario → operario1"),
                 (Evento.REASIGNACION, "operario1 → operario2"),
                 (Evento.PAGO, "Pendiente → Pagada"),
-                (Evento.ENTREGA, "Recibida → Entregada"),
+                (Evento.ENTREGA, "En espera → Entregada"),
             ],
         )
         self.assertTrue(all(e.usuario == self.superusuario for e in self.orden.historial.all()))
@@ -343,3 +352,248 @@ class HistorialDesdeAdminTests(TestCase):
         self.assertEqual(self.client.post(f"{base}/delete/", {"post": "yes"}).status_code, 403)
         evento.refresh_from_db()
         self.assertEqual(evento.detalle, "original")
+
+
+class CatalogoDePruebaMixin:
+    def crear_catalogo(self):
+        self.recepcionista = User.objects.create_user(
+            username="recepcion", password="x", rol=User.Rol.RECEPCIONISTA
+        )
+        self.cliente = Cliente.objects.create(
+            documento="1090123456", nombre_completo="Ana Gomez", telefono="3001112233"
+        )
+        self.camisa = TipoPrenda.objects.create(nombre="Camisa")
+        self.pantalon = TipoPrenda.objects.create(nombre="Pantalon")
+        self.lavado = Servicio.objects.create(nombre="Lavado")
+        self.planchado = Servicio.objects.create(nombre="Planchado")
+        self.tarifa(self.camisa, self.lavado, "4000", Tarifa.UnidadCobro.KILO)
+        self.tarifa(self.camisa, self.planchado, "2000", Tarifa.UnidadCobro.PRENDA)
+
+    def tarifa(self, tipo_prenda, servicio, valor, unidad, **vigencia):
+        vigencia.setdefault("vigente_desde", date(2020, 1, 1))
+        return Tarifa.objects.create(
+            tipo_prenda=tipo_prenda,
+            servicio=servicio,
+            valor=Decimal(valor),
+            unidad_cobro=unidad,
+            plazo_entrega_dias=1,
+            **vigencia,
+        )
+
+    def prenda(self, *servicios, tipo=None, **extra):
+        datos = {
+            "tipo_prenda": (tipo or self.camisa).pk,
+            "cantidad": 3,
+            "peso": "2.5",
+            "servicios": [s.pk for s in servicios],
+        }
+        datos.update(extra)
+        return datos
+
+    def registrar(self, *prendas):
+        return self.client.post(
+            "/api/ordenes",
+            {"cliente": self.cliente.pk, "prendas": list(prendas)},
+            format="json",
+        )
+
+
+class RegistrarOrdenApiTests(CatalogoDePruebaMixin, APITestCase):
+    def setUp(self):
+        self.crear_catalogo()
+        self.client.force_authenticate(self.recepcionista)
+
+    def test_registra_la_orden_en_espera_con_valor_abono_duracion_e_historial(self):
+        response = self.registrar(self.prenda(self.lavado, self.planchado, color="azul"))
+
+        self.assertEqual(response.status_code, 201, response.json())
+        datos = response.json()
+        self.assertTrue(datos["codigo"].startswith("SW-"))
+        self.assertEqual(datos["estado"], Orden.Estado.EN_ESPERA)
+        self.assertEqual(datos["estado_pago"], Orden.EstadoPago.PENDIENTE)
+        # Lavado: 4000 x 2,5 kg. Planchado: 2000 x 3 prendas.
+        self.assertEqual(Decimal(datos["valor_total"]), Decimal("16000"))
+        self.assertEqual(Decimal(datos["abono_requerido"]), Decimal("4800"))
+        self.assertEqual(datos["duracion_estimada_dias"], 2)
+        self.assertIsNone(datos["fecha_estimada_entrega"])
+        self.assertEqual(datos["detalle_prendas"][0]["color"], "azul")
+        orden = Orden.objects.get()
+        self.assertEqual(
+            list(orden.historial.values_list("tipo_evento", flat=True)), [Evento.CREACION]
+        )
+
+    def test_el_abono_requerido_se_redondea_hacia_arriba(self):
+        self.tarifa(self.pantalon, self.planchado, "3335", Tarifa.UnidadCobro.PRENDA)
+
+        response = self.registrar(self.prenda(self.planchado, tipo=self.pantalon, cantidad=1))
+
+        self.assertEqual(Decimal(response.json()["abono_requerido"]), Decimal("1001"))
+
+    def test_rechaza_una_orden_sin_prendas(self):
+        for cuerpo in ({"cliente": self.cliente.pk, "prendas": []}, {"cliente": self.cliente.pk}):
+            response = self.client.post("/api/ordenes", cuerpo, format="json")
+
+            self.assertEqual(response.status_code, 400)
+            self.assertIn("al menos una prenda", str(response.json()["prendas"]))
+        self.assertFalse(Orden.objects.exists())
+
+    def test_rechaza_una_prenda_sin_servicios(self):
+        response = self.registrar(self.prenda())
+
+        self.assertEqual(response.status_code, 400)
+
+    def test_rechaza_una_combinacion_sin_tarifa_vigente(self):
+        self.tarifa(
+            self.pantalon,
+            self.lavado,
+            "5000",
+            Tarifa.UnidadCobro.KILO,
+            vigente_hasta=date(2021, 1, 1),
+        )
+
+        response = self.registrar(self.prenda(self.lavado, tipo=self.pantalon))
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("No hay tarifa vigente", str(response.json()))
+        self.assertFalse(Orden.objects.exists())
+
+    def test_el_peso_es_obligatorio_si_algun_servicio_se_cobra_por_kilo(self):
+        sin_peso = self.registrar(self.prenda(self.lavado, peso=None))
+        por_prenda = self.registrar(self.prenda(self.planchado, peso=None))
+
+        self.assertEqual(sin_peso.status_code, 400)
+        self.assertIn("peso", str(sin_peso.json()))
+        self.assertEqual(por_prenda.status_code, 201)
+
+    def test_aplica_solo_la_regla_de_descuento_que_mas_descuenta(self):
+        self.tarifa(self.pantalon, self.planchado, "27000", Tarifa.UnidadCobro.PRENDA)
+        regla = {"activa": True, "vigente_desde": date(2020, 1, 1)}
+        ReglaDescuento.objects.create(nombre="10%", tipo="porcentaje", valor=10, **regla)
+        ReglaDescuento.objects.create(nombre="Fijo", tipo="monto_fijo", valor=1000, **regla)
+
+        response = self.registrar(self.prenda(self.planchado, tipo=self.pantalon, cantidad=1))
+
+        self.assertEqual(Decimal(response.json()["descuento"]), Decimal("2700"))
+        self.assertEqual(Decimal(response.json()["valor_total"]), Decimal("24300"))
+
+    def test_sin_regla_aplicable_el_descuento_es_cero(self):
+        ReglaDescuento.objects.create(
+            nombre="Inactiva", tipo="porcentaje", valor=50, activa=False,
+            vigente_desde=date(2020, 1, 1),
+        )
+        ReglaDescuento.objects.create(
+            nombre="Vencida", tipo="porcentaje", valor=50,
+            vigente_desde=date(2020, 1, 1), vigente_hasta=date(2021, 1, 1),
+        )
+        ReglaDescuento.objects.create(
+            nombre="Solo VIP", tipo="porcentaje", valor=50,
+            clasificacion_cliente=Cliente.Clasificacion.VIP, vigente_desde=date(2020, 1, 1),
+        )
+
+        response = self.registrar(self.prenda(self.planchado))
+
+        self.assertEqual(Decimal(response.json()["descuento"]), Decimal("0"))
+        self.assertEqual(Decimal(response.json()["valor_total"]), Decimal("6000"))
+
+    def test_el_operario_no_registra_ordenes(self):
+        operario = User.objects.create_user(username="op", password="x", rol=User.Rol.OPERARIO)
+        self.client.force_authenticate(operario)
+
+        self.assertEqual(self.registrar(self.prenda(self.planchado)).status_code, 403)
+
+    def test_si_una_prenda_es_invalida_no_se_guarda_nada(self):
+        response = self.registrar(
+            self.prenda(self.planchado), self.prenda(self.lavado, tipo=self.pantalon)
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(Orden.objects.exists())
+        self.assertFalse(Prenda.objects.exists())
+
+    def test_cambiar_la_tarifa_despues_no_altera_la_orden(self):
+        self.registrar(self.prenda(self.planchado))
+        Tarifa.objects.filter(servicio=self.planchado).update(valor=Decimal("9999"))
+
+        self.assertEqual(Orden.objects.get().valor_total, Decimal("6000"))
+
+
+class AgregarLineasApiTests(CatalogoDePruebaMixin, APITestCase):
+    def setUp(self):
+        self.crear_catalogo()
+        self.client.force_authenticate(self.recepcionista)
+        self.registrar(self.prenda(self.planchado))
+        self.orden = Orden.objects.get()
+
+    def agregar_prenda(self, *servicios, **extra):
+        return self.client.post(
+            f"/api/ordenes/{self.orden.pk}/prendas", self.prenda(*servicios, **extra), format="json"
+        )
+
+    def agregar_servicio(self, servicio):
+        prenda = self.orden.prendas.first()
+        return self.client.post(
+            f"/api/ordenes/{self.orden.pk}/prendas/{prenda.pk}/servicios",
+            {"servicio": servicio.pk},
+            format="json",
+        )
+
+    def test_agregar_una_prenda_recalcula_total_abono_y_duracion(self):
+        response = self.agregar_prenda(self.lavado)
+
+        self.assertEqual(response.status_code, 201, response.json())
+        self.orden.refresh_from_db()
+        self.assertEqual(self.orden.valor_total, Decimal("16000"))
+        self.assertEqual(self.orden.abono_requerido, Decimal("4800"))
+        self.assertEqual(self.orden.duracion_estimada_dias, 2)
+        self.assertEqual(self.orden.historial.last().tipo_evento, Evento.PRENDA_AGREGADA)
+
+    def test_agregar_un_servicio_a_una_prenda_recalcula_y_queda_en_el_historial(self):
+        response = self.agregar_servicio(self.lavado)
+
+        self.assertEqual(response.status_code, 201, response.json())
+        self.orden.refresh_from_db()
+        self.assertEqual(self.orden.valor_total, Decimal("16000"))
+        self.assertEqual(self.orden.historial.last().tipo_evento, Evento.SERVICIO_AGREGADO)
+
+    def test_no_repite_un_servicio_en_la_misma_prenda(self):
+        self.assertEqual(self.agregar_servicio(self.planchado).status_code, 400)
+
+    def test_con_el_abono_ya_alcanzado_no_se_pide_otro_y_se_recalcula_la_fecha(self):
+        # Viernes; la orden queda "Recibida" ese dia.
+        Orden.objects.filter(pk=self.orden.pk).update(
+            estado=Orden.Estado.RECIBIDA,
+            abono_alcanzado_en=date(2026, 10, 9),
+            abono_requerido=Decimal("1800"),
+        )
+
+        self.agregar_servicio(self.lavado)
+
+        self.orden.refresh_from_db()
+        self.assertEqual(self.orden.valor_total, Decimal("16000"))
+        self.assertEqual(self.orden.abono_requerido, Decimal("1800"))
+        # Dos servicios = 2 dias habiles: sabado y, saltando el domingo, lunes.
+        self.assertEqual(self.orden.fecha_estimada_entrega, date(2026, 10, 12))
+
+    def test_desde_en_proceso_no_se_agregan_prendas_ni_servicios(self):
+        Orden.objects.filter(pk=self.orden.pk).update(estado=Orden.Estado.EN_PROCESO)
+
+        self.assertEqual(self.agregar_prenda(self.planchado).status_code, 400)
+        self.assertEqual(self.agregar_servicio(self.lavado).status_code, 400)
+        self.assertEqual(self.orden.prendas.count(), 1)
+
+
+class DuracionEstimadaTests(TestCase):
+    def test_un_dia_base_mas_medio_dia_por_servicio_adicional_redondeado_hacia_arriba(self):
+        self.assertEqual(
+            [duracion_estimada_dias(n) for n in (1, 2, 3, 4)], [1, 2, 2, 3]
+        )
+
+    @override_settings(ORDEN_DURACION_POR_SERVICIO_ADICIONAL=Decimal("1"))
+    def test_los_valores_son_configurables(self):
+        self.assertEqual(duracion_estimada_dias(3), 3)
+
+    def test_cuenta_de_lunes_a_sabado_sin_domingos(self):
+        sabado = date(2026, 10, 10)
+        self.assertEqual(sumar_dias_habiles(sabado, 1), date(2026, 10, 12))
+        self.assertEqual(sumar_dias_habiles(date(2026, 10, 5), 5), sabado)
+
