@@ -31,6 +31,9 @@ def registrar_alta(obj, usuario):
     if isinstance(obj, Prenda):
         registrar_evento(obj.orden, Evento.PRENDA_AGREGADA, usuario, str(obj))
     elif isinstance(obj, OrdenServicio):
+        orden = obj.prenda.orden
+        orden.recalcular()
+        orden.save()
         registrar_evento(
             obj.prenda.orden,
             Evento.SERVICIO_AGREGADO,
@@ -83,6 +86,16 @@ class OrdenAdmin(HistorialEnAltasMixin, AutoriaAdminMixin):
     )
     list_filter = ("estado", "estado_pago", "operario")
     search_fields = ("codigo", "cliente__documento", "cliente__nombre_completo")
+    readonly_fields = AutoriaAdminMixin.readonly_fields + (
+        "codigo",
+        "subtotal",
+        "descuento",
+        "valor_total",
+        "abono_requerido",
+        "duracion_estimada_dias",
+        "fecha_estimada_entrega",
+        "abono_alcanzado_en",
+    )
     inlines = [PrendaInline, HistorialOrdenInline]
 
     def save_model(self, request, obj, form, change):

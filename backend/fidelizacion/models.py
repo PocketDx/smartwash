@@ -1,15 +1,32 @@
+from decimal import Decimal
+
 from django.db import models
+from django.db.models import Q
 
 from clientes.models import Cliente
 from core.models import ModeloConAutoria
 
 
-class ReglaDescuento(ModeloConAutoria):
-    """Regla de descuento configurable.
+class ReglaDescuentoQuerySet(models.QuerySet):
+    def aplicables(self, cliente, fecha):
+        # A diferencia de las tarifas, vigente_hasta es inclusivo: una promocion
+        # "hasta el 31" vale el 31.
+        return self.filter(
+            Q(vigente_hasta__isnull=True) | Q(vigente_hasta__gte=fecha),
+            Q(clasificacion_cliente="") | Q(clasificacion_cliente=cliente.clasificacion),
+            activa=True,
+            vigente_desde__lte=fecha,
+        )
 
-    Solo cubre crearla/editarla; aplicarla automaticamente sobre una
-    orden es un alcance distinto, no implementado aqui.
-    """
+    def mayor_descuento(self, cliente, monto, fecha):
+        """Las reglas no se acumulan: se aplica solo la que mas descuenta."""
+        return max(
+            (regla.descuento_sobre(monto) for regla in self.aplicables(cliente, fecha)),
+            default=Decimal("0"),
+        )
+
+
+class ReglaDescuento(ModeloConAutoria):
 
     class Tipo(models.TextChoices):
         PORCENTAJE = "porcentaje", "Porcentaje"
@@ -27,6 +44,8 @@ class ReglaDescuento(ModeloConAutoria):
     activa = models.BooleanField(default=True)
     vigente_desde = models.DateField()
     vigente_hasta = models.DateField(null=True, blank=True)
+
+    objects = ReglaDescuentoQuerySet.as_manager()
 
     class Meta:
         ordering = ("-vigente_desde", "nombre")
@@ -50,3 +69,8 @@ class ReglaDescuento(ModeloConAutoria):
 
     def __str__(self):
         return self.nombre
+
+    def descuento_sobre(self, monto):
+        if self.tipo == self.Tipo.PORCENTAJE:
+            return (monto * self.valor / 100).quantize(Decimal("0.01"))
+        return min(self.valor, monto)

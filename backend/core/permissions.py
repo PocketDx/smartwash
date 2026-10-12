@@ -18,3 +18,15 @@ class AdministradorORecepcionista(BasePermission):
             User.Rol.ADMINISTRADOR,
             User.Rol.RECEPCIONISTA,
         )
+
+
+class RecepcionEscribe(BasePermission):
+    """Cualquier sesion consulta; crean y modifican la recepcionista y el administrador."""
+
+    def has_permission(self, request, view):
+        if not request.user.is_authenticated:
+            return False
+        return request.method in SAFE_METHODS or request.user.rol in (
+            User.Rol.ADMINISTRADOR,
+            User.Rol.RECEPCIONISTA,
+        )

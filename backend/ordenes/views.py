@@ -1,10 +1,98 @@
 from django.shortcuts import get_object_or_404
-from rest_framework import generics
+from rest_framework import generics, status
+from rest_framework.response import Response
+from rest_framework.views import APIView
 
-from core.permissions import AdministradorORecepcionista
+from core.permissions import AdministradorORecepcionista, RecepcionEscribe
 
-from .models import Orden
-from .serializers import HistorialOrdenSerializer
+from .historial import operacion_sobre_orden, registrar_evento
+from .models import HistorialOrden, Orden, Prenda
+from .serializers import (
+    AgregarServicioSerializer,
+    HistorialOrdenSerializer,
+    OrdenSerializer,
+    PrendaEntradaSerializer,
+    agregar_prenda,
+    agregar_servicio,
+    exigir_orden_editable,
+    guardar_recalculo,
+)
+
+Evento = HistorialOrden.TipoEvento
+
+
+def ordenes_con_detalle():
+    return Orden.objects.select_related("cliente").prefetch_related(
+        "prendas__tipo_prenda", "prendas__servicios__tarifa__servicio"
+    )
+
+
+class OrdenListCreateView(generics.ListCreateAPIView):
+    serializer_class = OrdenSerializer
+    permission_classes = [RecepcionEscribe]
+
+    def get_queryset(self):
+        return ordenes_con_detalle()
+
+
+class OrdenDetailView(generics.RetrieveAPIView):
+    serializer_class = OrdenSerializer
+
+    def get_queryset(self):
+        return ordenes_con_detalle()
+
+
+def orden_para_editar(pk):
+    # El bloqueo evita que dos recepcionistas recalculen el total a la vez.
+    orden = get_object_or_404(Orden.objects.select_for_update(), pk=pk)
+    exigir_orden_editable(orden)
+    return orden
+
+
+def respuesta_orden(orden):
+    return Response(
+        OrdenSerializer(ordenes_con_detalle().get(pk=orden.pk)).data,
+        status=status.HTTP_201_CREATED,
+    )
+
+
+class AgregarPrendaView(APIView):
+    permission_classes = [AdministradorORecepcionista]
+
+    def post(self, request, pk):
+        entrada = PrendaEntradaSerializer(data=request.data)
+        entrada.is_valid(raise_exception=True)
+        with operacion_sobre_orden():
+            orden = orden_para_editar(pk)
+            prenda = agregar_prenda(orden, entrada.validated_data, request.user)
+            guardar_recalculo(orden, request.user)
+            registrar_evento(
+                orden,
+                Evento.PRENDA_AGREGADA,
+                request.user,
+                f"{prenda}. Nuevo total ${orden.valor_total}",
+            )
+        return respuesta_orden(orden)
+
+
+class AgregarServicioView(APIView):
+    permission_classes = [AdministradorORecepcionista]
+
+    def post(self, request, pk, prenda_pk):
+        with operacion_sobre_orden():
+            orden = orden_para_editar(pk)
+            prenda = get_object_or_404(Prenda, pk=prenda_pk, orden=orden)
+            entrada = AgregarServicioSerializer(data=request.data, context={"prenda": prenda})
+            entrada.is_valid(raise_exception=True)
+            linea = agregar_servicio(prenda, entrada.validated_data["servicio"], request.user)
+            guardar_recalculo(orden, request.user)
+            registrar_evento(
+                orden,
+                Evento.SERVICIO_AGREGADO,
+                request.user,
+                f"{linea} (${linea.valor_aplicado}). Nuevo total ${orden.valor_total}",
+            )
+        return respuesta_orden(orden)
 
 
 class HistorialOrdenView(generics.ListAPIView):
