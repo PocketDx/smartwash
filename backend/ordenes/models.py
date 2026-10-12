@@ -124,6 +124,19 @@ class Orden(ModeloConAutoria):
     def validar_reglas_de_pago(self):
         if self.operario_id is not None:
             self.exigir_abono()
+        # Sin excepcion de rol: ni el administrador entrega sin cobrar.
+        if self.estado == self.Estado.ENTREGADA:
+            self.exigir_pago_completo()
+
+    def exigir_pago_completo(self):
+        if self.pago_completo():
+            return
+        raise ValidationError(
+            {
+                "estado": "No se puede entregar la orden mientras el pago no este completo "
+                f"(saldo pendiente ${self.saldo_pendiente()})."
+            }
+        )
 
     def exigir_abono(self):
         if self.tiene_abono():
