@@ -192,6 +192,19 @@ class OrdenSerializer(serializers.ModelSerializer):
             f for f in fields if f not in ("cliente", "prendas", "detalle_prendas")
         )
 
+    def to_representation(self, orden):
+        datos = super().to_representation(orden)
+        # ponytail: una consulta de pagos por orden; anotar el queryset si el
+        # listado crece hasta notarse.
+        pagado = orden.total_pagado()
+        datos.update(
+            total_pagado=f"{pagado:.2f}",
+            saldo_pendiente=f"{max(orden.valor_total - pagado, 0):.2f}",
+            tiene_abono=orden.tiene_abono(),
+            pago_completo=pagado >= orden.valor_total,
+        )
+        return datos
+
     def create(self, validated_data):
         usuario = self.context["request"].user
         with operacion_sobre_orden():

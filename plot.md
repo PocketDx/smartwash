@@ -59,8 +59,8 @@ smartwash/
 
 Cada dominio nuevo del backlog entra como **una app de Django** bajo `backend/`.
 Ya existen `clientes/`, `catalogo/` y `ordenes/`, con sus modelos pero **sin
-endpoints**: T2 (SCRUM-51) pedia solo las entidades nucleo. Faltan `pagos/`,
-`fidelizacion/` y `notificaciones/`: se crean cuando se implemente su historia.
+endpoints**: T2 (SCRUM-51) pedia solo las entidades nucleo. `pagos/` y
+`fidelizacion/` ya existen; `notificaciones/` se crea cuando se implemente su historia.
 No crees apps vacias "para despues".
 
 ### Modelo de datos
@@ -77,6 +77,7 @@ nucleo (T2); el resto de tablas del modelo entra con su historia.
 | `Orden` | ordenes | `codigo` unico y publico. `operario` es nulo hasta HU10 |
 | `Prenda` | ordenes | Pertenece a una orden y tiene un `TipoPrenda` |
 | `OrdenServicio` | ordenes | Que servicios recibe cada prenda, con `valor_aplicado` congelado |
+| `Pago` | pagos | Inmutable. `Orden.total_pagado()`, `tiene_abono()` y `pago_completo()` son la unica fuente del estado financiero |
 
 Una prenda puede recibir **varios servicios**: una camisa va a lavado y a
 planchado. Por eso existe `OrdenServicio` y no un FK directo.
