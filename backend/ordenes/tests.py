@@ -4,17 +4,18 @@ from unittest import mock
 
 from django.contrib.auth import get_user_model
 from django.core.exceptions import PermissionDenied
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import IntegrityError, OperationalError, transaction
 from django.db.models import ProtectedError
 from django.test import TestCase, TransactionTestCase, override_settings
+from rest_framework.exceptions import ValidationError
 from rest_framework.test import APITestCase
 
 from catalogo.models import Servicio, TipoPrenda, Tarifa
 from clientes.models import Cliente
-
-from .historial import OperacionNoCompletada, operacion_sobre_orden, registrar_evento
 from fidelizacion.models import ReglaDescuento
 
+from .historial import OperacionNoCompletada, operacion_sobre_orden, registrar_evento
 from .models import (
     HistorialOrden,
     Orden,
@@ -138,6 +139,7 @@ class OrdenTests(TestCase):
         operario = User.objects.create_user(
             username="op", password="x", rol=User.Rol.OPERARIO
         )
+        self.orden.abono_alcanzado_en = date(2026, 1, 1)
         self.orden.operario = operario
         self.orden.save()
 
@@ -282,6 +284,10 @@ class HistorialDesdeAdminTests(TestCase):
         )
         self.client.force_login(self.superusuario)
         self.orden = crear_orden()
+        # Con el abono ya registrado, para poder asignarla (HU23).
+        Orden.objects.filter(pk=self.orden.pk).update(
+            estado=Orden.Estado.RECIBIDA, abono_alcanzado_en=date(2026, 10, 1)
+        )
 
     def guardar(self, url, **cambios):
         response = self.client.get(url)
@@ -314,7 +320,7 @@ class HistorialDesdeAdminTests(TestCase):
             [
                 (Evento.ASIGNACION, "sin operario → operario1"),
                 (Evento.REASIGNACION, "operario1 → operario2"),
-                (Evento.ENTREGA, "En espera → Entregada"),
+                (Evento.ENTREGA, "Recibida → Entregada"),
             ],
         )
         self.assertTrue(all(e.usuario == self.superusuario for e in self.orden.historial.all()))
@@ -594,4 +600,120 @@ class DuracionEstimadaTests(TestCase):
         sabado = date(2026, 10, 10)
         self.assertEqual(sumar_dias_habiles(sabado, 1), date(2026, 10, 12))
         self.assertEqual(sumar_dias_habiles(date(2026, 10, 5), 5), sabado)
+
+
+class AbonoAntesDeAsignarTests(CatalogoDePruebaMixin, APITestCase):
+    def setUp(self):
+        self.crear_catalogo()
+        self.client.force_authenticate(self.recepcionista)
+        # 16000 de valor total; abono minimo 4800.
+        self.registrar(self.prenda(self.lavado, self.planchado))
+        self.orden = Orden.objects.get()
+        self.operario = User.objects.create_user(
+            username="op", password="x", rol=User.Rol.OPERARIO
+        )
+
+    def pagar(self, monto):
+        self.client.post(
+            f"/api/ordenes/{self.orden.pk}/pagos",
+            {"monto": monto, "metodo": "efectivo"},
+            format="json",
+        )
+        self.orden.refresh_from_db()
+
+    def asignar(self):
+        with operacion_sobre_orden():
+            orden = Orden.objects.select_for_update().get(pk=self.orden.pk)
+            orden.operario = self.operario
+            orden.save()
+
+    def test_con_el_abono_minimo_la_orden_se_puede_asignar(self):
+        self.pagar("4800")
+
+        self.asignar()
+
+        self.orden.refresh_from_db()
+        self.assertEqual(self.orden.operario, self.operario)
+
+    def test_sin_abono_no_se_asigna_e_indica_el_abono_requerido(self):
+        self.pagar("1000")
+
+        with self.assertRaises(ValidationError) as error:
+            self.asignar()
+
+        self.assertIn("$4800", str(error.exception.detail))
+        self.assertIn("faltan $3800", str(error.exception.detail))
+        self.orden.refresh_from_db()
+        self.assertIsNone(self.orden.operario)
+
+    def test_una_orden_nueva_queda_en_espera_y_no_se_puede_asignar(self):
+        self.assertEqual(self.orden.estado, Orden.Estado.EN_ESPERA)
+        self.assertFalse(self.orden.tiene_abono())
+        with self.assertRaises(ValidationError):
+            self.asignar()
+
+    def test_al_registrar_el_abono_la_orden_pasa_a_recibida_y_se_puede_asignar(self):
+        self.pagar("2000")
+        self.pagar("2800")
+
+        self.assertEqual(self.orden.estado, Orden.Estado.RECIBIDA)
+        self.asignar()
+
+    def test_un_abono_insuficiente_queda_parcial_y_la_orden_sigue_en_espera(self):
+        self.pagar("4799")
+
+        self.assertEqual(self.orden.estado_pago, Orden.EstadoPago.PARCIAL)
+        self.assertEqual(self.orden.estado, Orden.Estado.EN_ESPERA)
+        with self.assertRaises(ValidationError):
+            self.asignar()
+
+    def test_si_sube_el_total_despues_del_abono_no_se_vuelve_a_exigir(self):
+        self.pagar("4800")
+        self.client.post(
+            f"/api/ordenes/{self.orden.pk}/prendas", self.prenda(self.lavado), format="json"
+        )
+        self.orden.refresh_from_db()
+
+        self.assertEqual(self.orden.valor_total, Decimal("26000"))
+        self.assertEqual(self.orden.estado, Orden.Estado.RECIBIDA)
+        self.assertTrue(self.orden.tiene_abono())
+        self.asignar()
+
+    def test_ningun_camino_guarda_una_orden_asignada_sin_abono(self):
+        self.orden.operario = self.operario
+        with self.assertRaises(DjangoValidationError):
+            self.orden.save()
+        with self.assertRaises(DjangoValidationError):
+            self.orden.full_clean()
+
+    @override_settings(
+        STORAGES={
+            "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+            "staticfiles": {"BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"},
+        }
+    )
+    def test_el_admin_muestra_el_error_y_no_asigna(self):
+        admin = User.objects.create_superuser(
+            username="root", password="x", rol=User.Rol.ADMINISTRADOR
+        )
+        self.client.force_login(admin)
+        url = f"/admin/ordenes/orden/{self.orden.pk}/change/"
+        formulario = self.client.get(url).context["adminform"].form
+        datos = {c.html_name: c.value() for c in formulario if c.value() is not None}
+        datos.update(
+            {
+                "operario": self.operario.pk,
+                "prendas-TOTAL_FORMS": "0",
+                "prendas-INITIAL_FORMS": "0",
+                "historial-TOTAL_FORMS": "0",
+                "historial-INITIAL_FORMS": "0",
+            }
+        )
+
+        response = self.client.post(url, datos)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "abono minimo de $4800")
+        self.orden.refresh_from_db()
+        self.assertIsNone(self.orden.operario)
 
