@@ -814,3 +814,101 @@ class EntregaExigePagoCompletoTests(CatalogoDePruebaMixin, APITestCase):
         self.orden.refresh_from_db()
         self.assertEqual(self.orden.estado, Orden.Estado.LISTA)
 
+
+class RegistrarEntregaApiTests(CatalogoDePruebaMixin, APITestCase):
+    def setUp(self):
+        self.crear_catalogo()
+        self.client.force_authenticate(self.recepcionista)
+        # Dos prendas: 6000 + 10000 = 16000.
+        self.registrar(self.prenda(self.planchado), self.prenda(self.lavado, color="rojo"))
+        self.orden = Orden.objects.get()
+        self.camisa_1, self.camisa_2 = self.orden.prendas.all()
+        self.url = f"/api/ordenes/{self.orden.pk}/entrega"
+
+    def pagar(self, monto):
+        self.client.post(
+            f"/api/ordenes/{self.orden.pk}/pagos",
+            {"monto": monto, "metodo": "efectivo"},
+            format="json",
+        )
+
+    def lista_y_pagada(self, monto="16000"):
+        self.pagar(monto)
+        Orden.objects.filter(pk=self.orden.pk).update(estado=Orden.Estado.LISTA)
+
+    def entregar(self, *verificaciones):
+        if not verificaciones:
+            verificaciones = (
+                {"prenda": self.camisa_1.pk, "coincide": True},
+                {"prenda": self.camisa_2.pk, "coincide": True},
+            )
+        return self.client.post(self.url, {"prendas": list(verificaciones)}, format="json")
+
+    def test_verificadas_las_prendas_y_pagada_la_orden_queda_entregada(self):
+        self.lista_y_pagada()
+
+        response = self.entregar()
+
+        self.assertEqual(response.status_code, 200, response.json())
+        self.orden.refresh_from_db()
+        self.assertEqual(self.orden.estado, Orden.Estado.ENTREGADA)
+        self.assertIsNotNone(self.orden.fecha_entrega)
+        evento = self.orden.historial.last()
+        self.assertEqual(evento.tipo_evento, Evento.ENTREGA)
+        self.assertEqual(evento.usuario, self.recepcionista)
+        self.assertIn("2 prendas verificadas, todas coinciden", evento.detalle)
+
+    def test_una_discrepancia_exige_observacion_y_queda_en_el_historial(self):
+        self.lista_y_pagada()
+        sin_observacion = self.entregar(
+            {"prenda": self.camisa_1.pk, "coincide": True},
+            {"prenda": self.camisa_2.pk, "coincide": False, "observacion": "  "},
+        )
+
+        self.assertEqual(sin_observacion.status_code, 400)
+        self.assertIn("observacion", str(sin_observacion.json()))
+
+        response = self.entregar(
+            {"prenda": self.camisa_1.pk, "coincide": True},
+            {"prenda": self.camisa_2.pk, "coincide": False, "observacion": "Mancha en el cuello"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Mancha en el cuello", self.orden.historial.last().detalle)
+
+    def test_con_pago_incompleto_no_se_entrega_e_indica_el_saldo(self):
+        self.lista_y_pagada(monto="10000")
+
+        response = self.entregar()
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("saldo pendiente $6000", str(response.json()))
+        self.orden.refresh_from_db()
+        self.assertEqual(self.orden.estado, Orden.Estado.LISTA)
+        self.assertNotEqual(self.orden.historial.last().tipo_evento, Evento.ENTREGA)
+
+    def test_solo_se_entrega_desde_lista_para_entrega(self):
+        self.pagar("16000")
+
+        response = self.entregar()
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Lista para entrega", str(response.json()))
+
+    def test_hay_que_verificar_cada_prenda_una_sola_vez(self):
+        self.lista_y_pagada()
+        uno = {"prenda": self.camisa_1.pk, "coincide": True}
+
+        for verificaciones in ((uno,), (uno, uno), (uno, {"prenda": 999, "coincide": True})):
+            self.assertEqual(self.entregar(*verificaciones).status_code, 400)
+        self.assertEqual(self.client.post(self.url, {"prendas": []}, format="json").status_code, 400)
+        self.orden.refresh_from_db()
+        self.assertEqual(self.orden.estado, Orden.Estado.LISTA)
+
+    def test_el_operario_no_registra_entregas(self):
+        self.lista_y_pagada()
+        operario = User.objects.create_user(username="op", password="x", rol=User.Rol.OPERARIO)
+        self.client.force_authenticate(operario)
+
+        self.assertEqual(self.entregar().status_code, 403)
+

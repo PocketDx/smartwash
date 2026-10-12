@@ -6,6 +6,7 @@ from .views import (
     HistorialOrdenView,
     OrdenDetailView,
     OrdenListCreateView,
+    RegistrarEntregaView,
 )
 
 urlpatterns = [
@@ -17,5 +18,6 @@ urlpatterns = [
         AgregarServicioView.as_view(),
         name="orden-prenda-servicios",
     ),
+    path("ordenes/<int:pk>/entrega", RegistrarEntregaView.as_view(), name="orden-entrega"),
     path("ordenes/<int:pk>/historial", HistorialOrdenView.as_view(), name="orden-historial"),
 ]
