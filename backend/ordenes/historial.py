@@ -17,8 +17,9 @@ Si algo falla en la base, no queda ni el cambio ni el registro.
 import logging
 from contextlib import contextmanager
 
+from django.core.exceptions import ValidationError as ReglaIncumplida
 from django.db import DatabaseError, transaction
-from rest_framework import status
+from rest_framework import serializers, status
 from rest_framework.exceptions import APIException
 
 from .models import HistorialOrden
@@ -38,6 +39,11 @@ def operacion_sobre_orden():
     try:
         with transaction.atomic():
             yield
+    except ReglaIncumplida as error:
+        # Las reglas viven en el modelo con la excepcion de Django; la API
+        # las devuelve como un 400 con el mismo mensaje.
+        detalle = error.message_dict if hasattr(error, "error_dict") else error.messages
+        raise serializers.ValidationError(detalle) from error
     except DatabaseError as error:
         logger.exception("Operacion sobre una orden revertida por un error de base de datos")
         raise OperacionNoCompletada from error

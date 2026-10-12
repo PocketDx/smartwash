@@ -2,7 +2,7 @@ from datetime import timedelta
 from decimal import ROUND_CEILING, Decimal
 
 from django.conf import settings
-from django.core.exceptions import PermissionDenied
+from django.core.exceptions import PermissionDenied, ValidationError
 from django.db import models
 from django.db.models import Sum
 from django.utils import timezone
@@ -113,7 +113,28 @@ class Orden(ModeloConAutoria):
             self.codigo = f"SW-{get_random_string(8, ALFABETO_CODIGO)}"
         # Se deriva de los pagos en cada guardado: nadie lo fija a mano.
         self.estado_pago = self.calcular_estado_pago()
+        # Ultima barrera: ningun camino (API, admin, shell) guarda una orden
+        # que rompa las reglas de pago.
+        self.validar_reglas_de_pago()
         super().save(*args, **kwargs)
+
+    def clean(self):
+        self.validar_reglas_de_pago()
+
+    def validar_reglas_de_pago(self):
+        if self.operario_id is not None:
+            self.exigir_abono()
+
+    def exigir_abono(self):
+        if self.tiene_abono():
+            return
+        falta = max(self.abono_requerido - self.total_pagado(), Decimal("0"))
+        raise ValidationError(
+            {
+                "operario": f"La orden requiere un abono minimo de ${self.abono_requerido} "
+                f"antes de asignarse a un operario (faltan ${falta})."
+            }
+        )
 
     def total_pagado(self):
         if self.pk is None:
