@@ -1,4 +1,5 @@
 from django.conf import settings
+from django.core.exceptions import PermissionDenied
 from django.db import models
 
 from catalogo.models import Tarifa, TipoPrenda
@@ -116,3 +117,72 @@ class OrdenServicio(ModeloConAutoria):
 
     def __str__(self):
         return f"{self.prenda} - {self.tarifa.servicio}"
+
+
+MENSAJE_HISTORIAL_INMUTABLE = "El historial de una orden no se puede modificar ni eliminar."
+
+
+class HistorialOrdenQuerySet(models.QuerySet):
+    # update() y delete() masivos no pasan por save()/delete() del modelo.
+    def update(self, **kwargs):
+        raise PermissionDenied(MENSAJE_HISTORIAL_INMUTABLE)
+
+    def delete(self):
+        raise PermissionDenied(MENSAJE_HISTORIAL_INMUTABLE)
+
+
+class HistorialOrden(models.Model):
+    """Registro inmutable de lo que le ocurre a una orden.
+
+    No se crea a mano: se usa ordenes.historial.registrar_evento, dentro de la
+    misma transaccion que el cambio que se registra.
+    """
+
+    class TipoEvento(models.TextChoices):
+        CREACION = "creacion", "Creación"
+        PAGO = "pago", "Pago"
+        ASIGNACION = "asignacion", "Asignación"
+        REASIGNACION = "reasignacion", "Reasignación"
+        CAMBIO_ESTADO = "cambio_estado", "Cambio de estado"
+        PRENDA_AGREGADA = "prenda_agregada", "Prenda agregada"
+        SERVICIO_AGREGADO = "servicio_agregado", "Servicio agregado"
+        ENTREGA = "entrega", "Entrega"
+
+    # PROTECT en ambos: borrar la orden o el usuario dejaria el historial
+    # incompleto o sin autor.
+    orden = models.ForeignKey(
+        Orden, on_delete=models.PROTECT, related_name="historial", editable=False
+    )
+    usuario = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="eventos_de_orden",
+        editable=False,
+    )
+    tipo_evento = models.CharField(
+        max_length=30, choices=TipoEvento.choices, editable=False
+    )
+    detalle = models.TextField(blank=True, editable=False)
+    fecha = models.DateTimeField(auto_now_add=True)
+
+    objects = HistorialOrdenQuerySet.as_manager()
+
+    class Meta:
+        verbose_name = "evento de la orden"
+        verbose_name_plural = "historial de ordenes"
+        ordering = ("fecha", "id")
+
+    def __str__(self):
+        return f"{self.orden.codigo} · {self.get_tipo_evento_display()} · {self.fecha:%Y-%m-%d %H:%M}"
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding:
+            raise PermissionDenied(MENSAJE_HISTORIAL_INMUTABLE)
+        # Una instancia nueva con el pk de un registro existente haria UPDATE.
+        kwargs["force_insert"] = True
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise PermissionDenied(MENSAJE_HISTORIAL_INMUTABLE)
