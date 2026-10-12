@@ -50,6 +50,7 @@ INSTALLED_APPS = [
     "catalogo",
     "ordenes",
     "fidelizacion",
+    "pagos",
     # drf
     "drf_spectacular",
 ]

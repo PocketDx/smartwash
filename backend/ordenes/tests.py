@@ -307,7 +307,6 @@ class HistorialDesdeAdminTests(TestCase):
 
         self.editar_orden(operario=operario1.pk)
         self.editar_orden(operario=operario2.pk)
-        self.editar_orden(estado_pago=Orden.EstadoPago.PAGADA)
         self.editar_orden(estado=Orden.Estado.ENTREGADA)
 
         self.assertEqual(
@@ -315,7 +314,6 @@ class HistorialDesdeAdminTests(TestCase):
             [
                 (Evento.ASIGNACION, "sin operario → operario1"),
                 (Evento.REASIGNACION, "operario1 → operario2"),
-                (Evento.PAGO, "Pendiente → Pagada"),
                 (Evento.ENTREGA, "En espera → Entregada"),
             ],
         )

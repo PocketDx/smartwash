@@ -111,10 +111,38 @@ class Orden(ModeloConAutoria):
             # ponytail: sin reintento; con 32^8 combinaciones un choque es
             # improbable y el unique de la base lo detiene si ocurre.
             self.codigo = f"SW-{get_random_string(8, ALFABETO_CODIGO)}"
+        # Se deriva de los pagos en cada guardado: nadie lo fija a mano.
+        self.estado_pago = self.calcular_estado_pago()
         super().save(*args, **kwargs)
+
+    def total_pagado(self):
+        if self.pk is None:
+            return Decimal("0")
+        return self.pagos.aggregate(total=Sum("monto"))["total"] or Decimal("0")
+
+    def saldo_pendiente(self):
+        return max(self.valor_total - self.total_pagado(), Decimal("0"))
+
+    def pago_completo(self):
+        return self.total_pagado() >= self.valor_total
 
     def tiene_abono(self):
         return self.abono_alcanzado_en is not None
+
+    def calcular_estado_pago(self):
+        pagado = self.total_pagado()
+        if pagado == 0:
+            return self.EstadoPago.PENDIENTE
+        if pagado >= self.valor_total:
+            return self.EstadoPago.PAGADA
+        return self.EstadoPago.PARCIAL
+
+    def registrar_abono_minimo(self, fecha):
+        """La orden en espera pasa a "Recibida" y desde ese dia corre la fecha estimada."""
+        self.abono_alcanzado_en = fecha
+        if self.estado == self.Estado.EN_ESPERA:
+            self.estado = self.Estado.RECIBIDA
+        self.fecha_estimada_entrega = sumar_dias_habiles(fecha, self.duracion_estimada_dias)
 
     def recalcular(self):
         """Valor, abono y duracion a partir de las lineas. No guarda."""

@@ -19,8 +19,6 @@ def eventos_por_cambio(anterior, actual):
         eventos.append(
             (tipo, f"{_nombre(anterior.operario)} → {_nombre(actual.operario)}")
         )
-    if anterior.estado_pago != actual.estado_pago:
-        eventos.append((Evento.PAGO, f"{anterior.estado_pago} → {actual.estado_pago}"))
     if anterior.estado != actual.estado:
         tipo = Evento.ENTREGA if actual.estado == Orden.Estado.ENTREGADA else Evento.CAMBIO_ESTADO
         eventos.append((tipo, f"{anterior.estado} → {actual.estado}"))
@@ -88,6 +86,7 @@ class OrdenAdmin(HistorialEnAltasMixin, AutoriaAdminMixin):
     search_fields = ("codigo", "cliente__documento", "cliente__nombre_completo")
     readonly_fields = AutoriaAdminMixin.readonly_fields + (
         "codigo",
+        "estado_pago",
         "subtotal",
         "descuento",
         "valor_total",
