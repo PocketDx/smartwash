@@ -717,3 +717,100 @@ class AbonoAntesDeAsignarTests(CatalogoDePruebaMixin, APITestCase):
         self.orden.refresh_from_db()
         self.assertIsNone(self.orden.operario)
 
+
+class EntregaExigePagoCompletoTests(CatalogoDePruebaMixin, APITestCase):
+    def setUp(self):
+        self.crear_catalogo()
+        self.client.force_authenticate(self.recepcionista)
+        # 16000 de valor total.
+        self.registrar(self.prenda(self.lavado, self.planchado))
+        self.orden = Orden.objects.get()
+
+    def pagar(self, monto):
+        self.client.post(
+            f"/api/ordenes/{self.orden.pk}/pagos",
+            {"monto": monto, "metodo": "efectivo"},
+            format="json",
+        )
+
+    def entregar(self):
+        with operacion_sobre_orden():
+            orden = Orden.objects.select_for_update().get(pk=self.orden.pk)
+            orden.estado = Orden.Estado.ENTREGADA
+            orden.save()
+
+    def preparar_para_entrega(self):
+        Orden.objects.filter(pk=self.orden.pk).update(estado=Orden.Estado.LISTA)
+
+    def test_con_el_pago_completo_la_orden_se_entrega(self):
+        self.pagar("16000")
+        self.preparar_para_entrega()
+
+        self.entregar()
+
+        self.orden.refresh_from_db()
+        self.assertEqual(self.orden.estado, Orden.Estado.ENTREGADA)
+
+    def test_con_pago_incompleto_se_bloquea_e_indica_el_saldo(self):
+        self.pagar("10000")
+        self.preparar_para_entrega()
+
+        with self.assertRaises(ValidationError) as error:
+            self.entregar()
+
+        self.assertIn("saldo pendiente $6000", str(error.exception.detail))
+        self.orden.refresh_from_db()
+        self.assertEqual(self.orden.estado, Orden.Estado.LISTA)
+
+    def test_el_bloqueo_aplica_tambien_al_administrador_y_fuera_de_la_api(self):
+        self.preparar_para_entrega()
+        self.orden.refresh_from_db()
+        self.orden.estado = Orden.Estado.ENTREGADA
+
+        with self.assertRaises(DjangoValidationError):
+            self.orden.full_clean()
+        with self.assertRaises(DjangoValidationError):
+            self.orden.save()
+
+    def test_nadie_deja_el_estado_de_pago_en_pagada_sin_pago_completo(self):
+        self.pagar("10000")
+        self.orden.refresh_from_db()
+
+        self.orden.estado_pago = Orden.EstadoPago.PAGADA
+        self.orden.save()
+        respuesta = self.client.patch(
+            f"/api/ordenes/{self.orden.pk}", {"estado_pago": "Pagada"}, format="json"
+        )
+
+        self.assertEqual(respuesta.status_code, 405)
+        self.orden.refresh_from_db()
+        self.assertEqual(self.orden.estado_pago, Orden.EstadoPago.PARCIAL)
+
+    def test_si_sube_el_total_tras_el_abono_hay_que_pagar_la_diferencia_para_entregar(self):
+        self.pagar("16000")
+        self.client.post(
+            f"/api/ordenes/{self.orden.pk}/prendas", self.prenda(self.planchado), format="json"
+        )
+        self.preparar_para_entrega()
+
+        with self.assertRaises(ValidationError) as error:
+            self.entregar()
+        self.assertIn("saldo pendiente $6000", str(error.exception.detail))
+
+        self.pagar("6000")
+        self.entregar()
+
+    def test_si_falla_la_base_no_se_aplica_ningun_cambio(self):
+        self.pagar("16000")
+        self.preparar_para_entrega()
+
+        with (
+            mock.patch.object(Orden, "save", side_effect=OperationalError("sin conexion")),
+            self.assertLogs("ordenes.historial", level="ERROR"),
+            self.assertRaises(OperacionNoCompletada),
+        ):
+            self.entregar()
+
+        self.orden.refresh_from_db()
+        self.assertEqual(self.orden.estado, Orden.Estado.LISTA)
+
