@@ -1,5 +1,6 @@
 from django.shortcuts import get_object_or_404
-from rest_framework import generics, status
+from django.utils import timezone
+from rest_framework import generics, serializers, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -9,6 +10,7 @@ from .historial import operacion_sobre_orden, registrar_evento
 from .models import HistorialOrden, Orden, Prenda
 from .serializers import (
     AgregarServicioSerializer,
+    EntregaSerializer,
     HistorialOrdenSerializer,
     OrdenSerializer,
     PrendaEntradaSerializer,
@@ -93,6 +95,30 @@ class AgregarServicioView(APIView):
                 f"{linea} (${linea.valor_aplicado}). Nuevo total ${orden.valor_total}",
             )
         return respuesta_orden(orden)
+
+
+class RegistrarEntregaView(APIView):
+    permission_classes = [AdministradorORecepcionista]
+
+    def post(self, request, pk):
+        entrada = EntregaSerializer(data=request.data)
+        entrada.is_valid(raise_exception=True)
+        with operacion_sobre_orden():
+            orden = get_object_or_404(Orden.objects.select_for_update(), pk=pk)
+            if orden.estado != Orden.Estado.LISTA:
+                raise serializers.ValidationError(
+                    {"estado": f'La orden esta "{orden.estado}"; solo se entrega desde "Lista para entrega".'}
+                )
+            detalle = entrada.verificar_contra(orden)
+            # save() exige el pago completo (HU24) e indica el saldo si falta.
+            orden.estado = Orden.Estado.ENTREGADA
+            orden.fecha_entrega = timezone.now()
+            orden.registrar_autoria(request.user)
+            orden.save()
+            registrar_evento(
+                orden, Evento.ENTREGA, request.user, f"Lista para entrega → Entregada. {detalle}"
+            )
+        return Response(OrdenSerializer(ordenes_con_detalle().get(pk=orden.pk)).data)
 
 
 class HistorialOrdenView(generics.ListAPIView):

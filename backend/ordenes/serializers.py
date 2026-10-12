@@ -233,3 +233,44 @@ class AgregarServicioSerializer(serializers.Serializer):
         tarifa = tarifa_vigente(prenda.tipo_prenda, servicio)
         exigir_peso(prenda.peso, [tarifa])
         return tarifa
+
+
+class VerificacionPrendaSerializer(serializers.Serializer):
+    prenda = serializers.IntegerField()
+    coincide = serializers.BooleanField()
+    observacion = serializers.CharField(required=False, allow_blank=True, default="")
+
+    def validate(self, attrs):
+        attrs["observacion"] = attrs["observacion"].strip()
+        if not attrs["coincide"] and not attrs["observacion"]:
+            raise serializers.ValidationError(
+                {"observacion": "Es obligatoria cuando la prenda no coincide con lo solicitado."}
+            )
+        return attrs
+
+
+class EntregaSerializer(serializers.Serializer):
+    prendas = VerificacionPrendaSerializer(
+        many=True,
+        allow_empty=False,
+        error_messages={"empty": "Hay que verificar cada prenda de la orden."},
+    )
+
+    def verificar_contra(self, orden):
+        """Devuelve el detalle para el historial; exige cada prenda una sola vez."""
+        verificaciones = self.validated_data["prendas"]
+        registradas = {p.pk: p for p in orden.prendas.select_related("tipo_prenda")}
+        if sorted(v["prenda"] for v in verificaciones) != sorted(registradas):
+            raise serializers.ValidationError(
+                {"prendas": "Hay que verificar cada prenda de la orden, una sola vez."}
+            )
+        discrepancias = [
+            f"{registradas[v['prenda']]}: {v['observacion']}"
+            for v in verificaciones
+            if not v["coincide"]
+        ]
+        detalle = f"{len(registradas)} prendas verificadas"
+        if discrepancias:
+            return f"{detalle}. Discrepancias: " + "; ".join(discrepancias)
+        return f"{detalle}, todas coinciden con lo solicitado"
+
