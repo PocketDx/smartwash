@@ -3,7 +3,9 @@ from django.urls import path
 from .views import (
     AgregarPrendaView,
     AgregarServicioView,
+    AsignarOperarioView,
     HistorialOrdenView,
+    OperariosActivosView,
     OrdenDetailView,
     OrdenListCreateView,
     RegistrarEntregaView,
@@ -18,6 +20,10 @@ urlpatterns = [
         AgregarServicioView.as_view(),
         name="orden-prenda-servicios",
     ),
+    path(
+        "ordenes/<int:pk>/asignacion", AsignarOperarioView.as_view(), name="orden-asignacion"
+    ),
     path("ordenes/<int:pk>/entrega", RegistrarEntregaView.as_view(), name="orden-entrega"),
     path("ordenes/<int:pk>/historial", HistorialOrdenView.as_view(), name="orden-historial"),
+    path("operarios", OperariosActivosView.as_view(), name="operarios-activos"),
 ]
