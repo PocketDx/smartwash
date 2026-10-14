@@ -10,14 +10,18 @@ from .historial import operacion_sobre_orden, registrar_evento
 from .models import HistorialOrden, Orden, Prenda
 from .serializers import (
     AgregarServicioSerializer,
+    AsignacionSerializer,
     EntregaSerializer,
     HistorialOrdenSerializer,
+    OperarioSerializer,
     OrdenSerializer,
     PrendaEntradaSerializer,
     agregar_prenda,
     agregar_servicio,
+    asignar_operario,
     exigir_orden_editable,
     guardar_recalculo,
+    operarios_activos,
 )
 
 Evento = HistorialOrden.TipoEvento
@@ -119,6 +123,31 @@ class RegistrarEntregaView(APIView):
                 orden, Evento.ENTREGA, request.user, f"Lista para entrega → Entregada. {detalle}"
             )
         return Response(OrdenSerializer(ordenes_con_detalle().get(pk=orden.pk)).data)
+
+
+class AsignarOperarioView(APIView):
+    permission_classes = [AdministradorORecepcionista]
+
+    def post(self, request, pk):
+        with operacion_sobre_orden():
+            orden = get_object_or_404(Orden.objects.select_for_update(), pk=pk)
+            # Se valida con la orden bloqueada para leer el estado del operario
+            # dentro de la misma transaccion que la asignacion.
+            entrada = AsignacionSerializer(data=request.data)
+            entrada.is_valid(raise_exception=True)
+            tipo, detalle = asignar_operario(
+                orden, entrada.validated_data["operario"], request.user
+            )
+            registrar_evento(orden, tipo, request.user, detalle)
+        return Response(OrdenSerializer(ordenes_con_detalle().get(pk=orden.pk)).data)
+
+
+class OperariosActivosView(generics.ListAPIView):
+    serializer_class = OperarioSerializer
+    permission_classes = [AdministradorORecepcionista]
+
+    def get_queryset(self):
+        return operarios_activos().order_by("first_name", "last_name", "username")
 
 
 class HistorialOrdenView(generics.ListAPIView):

@@ -912,3 +912,212 @@ class RegistrarEntregaApiTests(CatalogoDePruebaMixin, APITestCase):
 
         self.assertEqual(self.entregar().status_code, 403)
 
+
+class AsignarOperarioApiTests(CatalogoDePruebaMixin, APITestCase):
+    def setUp(self):
+        self.crear_catalogo()
+        self.client.force_authenticate(self.recepcionista)
+        # 16000 de valor total; abono minimo 4800.
+        self.registrar(self.prenda(self.lavado, self.planchado))
+        self.orden = Orden.objects.get()
+        self.operario = User.objects.create_user(
+            username="op1", password="x", rol=User.Rol.OPERARIO, first_name="Luis"
+        )
+        self.otro_operario = User.objects.create_user(
+            username="op2", password="x", rol=User.Rol.OPERARIO, first_name="Marta"
+        )
+        self.admin = User.objects.create_user(
+            username="jefe", password="x", rol=User.Rol.ADMINISTRADOR
+        )
+
+    def pagar(self, monto):
+        self.client.post(
+            f"/api/ordenes/{self.orden.pk}/pagos",
+            {"monto": monto, "metodo": "efectivo"},
+            format="json",
+        )
+
+    def asignar(self, operario):
+        pk = operario.pk if isinstance(operario, User) else operario
+        return self.client.post(
+            f"/api/ordenes/{self.orden.pk}/asignacion", {"operario": pk}, format="json"
+        )
+
+    def eventos(self, tipo):
+        return HistorialOrden.objects.filter(orden=self.orden, tipo_evento=tipo)
+
+    def fijar_estado(self, estado):
+        Orden.objects.filter(pk=self.orden.pk).update(estado=estado)
+
+    def desactivar(self, usuario):
+        usuario.is_active = False
+        usuario.save()
+
+    def test_con_abono_la_recepcionista_asigna_y_queda_en_el_historial(self):
+        self.pagar("4800")
+
+        response = self.asignar(self.operario)
+
+        self.assertEqual(response.status_code, 200, response.json())
+        self.assertEqual(response.json()["operario"], self.operario.pk)
+        self.orden.refresh_from_db()
+        self.assertEqual(self.orden.operario, self.operario)
+        self.assertEqual(self.orden.actualizado_por, self.recepcionista)
+        evento = self.eventos(Evento.ASIGNACION).get()
+        self.assertEqual(evento.usuario, self.recepcionista)
+        self.assertEqual(evento.detalle, "Asignada a Luis")
+        self.assertIsNotNone(evento.fecha)
+
+    def test_el_administrador_tambien_asigna(self):
+        self.pagar("4800")
+        self.client.force_authenticate(self.admin)
+
+        self.assertEqual(self.asignar(self.operario).status_code, 200)
+        self.assertEqual(self.eventos(Evento.ASIGNACION).get().usuario, self.admin)
+
+    def test_sin_abono_rechaza_e_indica_que_se_requiere(self):
+        self.pagar("1000")
+
+        response = self.asignar(self.operario)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("abono minimo de $4800", str(response.json()))
+        self.orden.refresh_from_db()
+        self.assertIsNone(self.orden.operario)
+        self.assertFalse(self.eventos(Evento.ASIGNACION).exists())
+
+    def test_no_asigna_una_orden_en_espera(self):
+        self.pagar("4800")
+        self.fijar_estado(Orden.Estado.EN_ESPERA)
+
+        response = self.asignar(self.operario)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("En espera", str(response.json()))
+
+    def test_no_asigna_a_un_operario_inactivo(self):
+        self.pagar("4800")
+        self.desactivar(self.operario)
+
+        response = self.asignar(self.operario)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("operario activo", str(response.json()))
+
+    def test_no_asigna_a_quien_no_es_operario_ni_a_ids_invalidos(self):
+        self.pagar("4800")
+
+        for invalido in (self.recepcionista, self.admin, 999999, "abc", None):
+            with self.subTest(invalido=invalido):
+                self.assertEqual(self.asignar(invalido).status_code, 400)
+        self.orden.refresh_from_db()
+        self.assertIsNone(self.orden.operario)
+
+    def test_reasigna_en_recibida_y_en_clasificada(self):
+        self.pagar("4800")
+        self.asignar(self.operario)
+
+        self.assertEqual(self.asignar(self.otro_operario).status_code, 200)
+        self.fijar_estado(Orden.Estado.CLASIFICADA)
+        self.assertEqual(self.asignar(self.operario).status_code, 200)
+
+        self.orden.refresh_from_db()
+        self.assertEqual(self.orden.operario, self.operario)
+        detalles = list(self.eventos(Evento.REASIGNACION).values_list("detalle", flat=True))
+        self.assertEqual(detalles, ["Luis → Marta", "Marta → Luis"])
+
+    def test_reasignar_al_mismo_operario_se_rechaza_sin_ensuciar_el_historial(self):
+        self.pagar("4800")
+        self.asignar(self.operario)
+
+        self.assertEqual(self.asignar(self.operario).status_code, 400)
+        self.assertFalse(self.eventos(Evento.REASIGNACION).exists())
+
+    def test_en_proceso_la_orden_queda_fija(self):
+        self.pagar("4800")
+        self.asignar(self.operario)
+        self.fijar_estado(Orden.Estado.EN_PROCESO)
+
+        self.assertEqual(self.asignar(self.otro_operario).status_code, 400)
+        self.client.force_authenticate(self.admin)
+        self.assertEqual(self.asignar(self.otro_operario).status_code, 400)
+        self.orden.refresh_from_db()
+        self.assertEqual(self.orden.operario, self.operario)
+
+    def test_el_admin_reasigna_en_proceso_si_el_operario_fue_desactivado(self):
+        self.pagar("4800")
+        self.asignar(self.operario)
+        self.fijar_estado(Orden.Estado.EN_PROCESO)
+        self.desactivar(self.operario)
+
+        self.assertEqual(self.asignar(self.otro_operario).status_code, 400)
+        self.client.force_authenticate(self.admin)
+        response = self.asignar(self.otro_operario)
+
+        self.assertEqual(response.status_code, 200, response.json())
+        evento = self.eventos(Evento.REASIGNACION).get()
+        self.assertEqual(evento.usuario, self.admin)
+        self.assertIn("desactivado", evento.detalle)
+
+    def test_no_reasigna_una_orden_lista_entregada_o_cancelada(self):
+        self.pagar("4800")
+        self.asignar(self.operario)
+        self.desactivar(self.operario)
+        self.client.force_authenticate(self.admin)
+
+        for estado in (Orden.Estado.LISTA, Orden.Estado.ENTREGADA, Orden.Estado.CANCELADA):
+            with self.subTest(estado=estado):
+                self.fijar_estado(estado)
+                self.assertEqual(self.asignar(self.otro_operario).status_code, 400)
+
+    def test_el_operario_recibe_403_al_asignar_o_reasignar(self):
+        self.pagar("4800")
+        self.client.force_authenticate(self.operario)
+        self.assertEqual(self.asignar(self.operario).status_code, 403)
+
+        self.client.force_authenticate(self.recepcionista)
+        self.asignar(self.operario)
+        self.client.force_authenticate(self.operario)
+        self.assertEqual(self.asignar(self.otro_operario).status_code, 403)
+
+        self.orden.refresh_from_db()
+        self.assertEqual(self.orden.operario, self.operario)
+
+    def test_sin_sesion_no_asigna(self):
+        self.client.force_authenticate(None)
+
+        self.assertIn(self.asignar(self.operario).status_code, (401, 403))
+
+    def test_una_peticion_rechazada_no_deja_cambios_ni_eventos(self):
+        self.pagar("4800")
+        antes = HistorialOrden.objects.count()
+
+        self.assertEqual(self.asignar(None).status_code, 400)
+
+        self.orden.refresh_from_db()
+        self.assertIsNone(self.orden.operario)
+        self.assertEqual(HistorialOrden.objects.count(), antes)
+
+    def test_si_falla_el_historial_no_queda_la_asignacion(self):
+        self.pagar("4800")
+
+        with mock.patch("ordenes.views.registrar_evento", side_effect=OperationalError("caida")):
+            response = self.asignar(self.operario)
+
+        self.assertEqual(response.status_code, 503)
+        self.orden.refresh_from_db()
+        self.assertIsNone(self.orden.operario)
+
+    def test_lista_solo_operarios_activos_para_recepcion_y_admin(self):
+        User.objects.create_user(
+            username="op3", password="x", rol=User.Rol.OPERARIO, is_active=False
+        )
+
+        response = self.client.get("/api/operarios")
+
+        self.assertEqual(response.status_code, 200)
+        ids = {o["id"] for o in response.json()}
+        self.assertEqual(ids, {self.operario.pk, self.otro_operario.pk})
+        self.client.force_authenticate(self.operario)
+        self.assertEqual(self.client.get("/api/operarios").status_code, 403)
+
