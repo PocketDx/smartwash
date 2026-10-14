@@ -3,6 +3,7 @@ from django.urls import path
 from .views import (
     AgregarPrendaView,
     AgregarServicioView,
+    CambiarEstadoView,
     HistorialOrdenView,
     OrdenDetailView,
     OrdenListCreateView,
@@ -19,5 +20,6 @@ urlpatterns = [
         name="orden-prenda-servicios",
     ),
     path("ordenes/<int:pk>/entrega", RegistrarEntregaView.as_view(), name="orden-entrega"),
+    path("ordenes/<int:pk>/estado", CambiarEstadoView.as_view(), name="orden-estado"),
     path("ordenes/<int:pk>/historial", HistorialOrdenView.as_view(), name="orden-historial"),
 ]

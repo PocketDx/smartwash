@@ -20,6 +20,14 @@ class AdministradorORecepcionista(BasePermission):
         )
 
 
+class AdministradorOOperario(BasePermission):
+    def has_permission(self, request, view):
+        return request.user.is_authenticated and request.user.rol in (
+            User.Rol.ADMINISTRADOR,
+            User.Rol.OPERARIO,
+        )
+
+
 class RecepcionEscribe(BasePermission):
     """Cualquier sesion consulta; crean y modifican la recepcionista y el administrador."""
 

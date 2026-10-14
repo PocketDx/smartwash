@@ -1,15 +1,22 @@
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework import generics, serializers, status
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from core.permissions import AdministradorORecepcionista, RecepcionEscribe
+from accounts.models import User
+from core.permissions import (
+    AdministradorOOperario,
+    AdministradorORecepcionista,
+    RecepcionEscribe,
+)
 
 from .historial import operacion_sobre_orden, registrar_evento
 from .models import HistorialOrden, Orden, Prenda
 from .serializers import (
     AgregarServicioSerializer,
+    CambioEstadoSerializer,
     EntregaSerializer,
     HistorialOrdenSerializer,
     OrdenSerializer,
@@ -118,6 +125,28 @@ class RegistrarEntregaView(APIView):
             registrar_evento(
                 orden, Evento.ENTREGA, request.user, f"Lista para entrega → Entregada. {detalle}"
             )
+        return Response(OrdenSerializer(ordenes_con_detalle().get(pk=orden.pk)).data)
+
+
+class CambiarEstadoView(APIView):
+    permission_classes = [AdministradorOOperario]
+
+    def post(self, request, pk):
+        entrada = CambioEstadoSerializer(data=request.data)
+        entrada.is_valid(raise_exception=True)
+        nuevo = entrada.validated_data["estado"]
+        with operacion_sobre_orden():
+            orden = get_object_or_404(Orden.objects.select_for_update(), pk=pk)
+            if request.user.rol == User.Rol.OPERARIO and orden.operario_id != request.user.pk:
+                raise PermissionDenied("No tienes permiso para cambiar el estado de esta orden.")
+            anterior = orden.estado
+            orden.cambiar_estado(nuevo)
+            orden.registrar_autoria(request.user)
+            orden.save()
+            detalle = f"{anterior} → {nuevo}"
+            if nuevo == Orden.Estado.EN_PROCESO and anterior == Orden.Estado.CONTROL_CALIDAD:
+                detalle += f" (reproceso {orden.numero_reprocesos})"
+            registrar_evento(orden, Evento.CAMBIO_ESTADO, request.user, detalle)
         return Response(OrdenSerializer(ordenes_con_detalle().get(pk=orden.pk)).data)
 
 
