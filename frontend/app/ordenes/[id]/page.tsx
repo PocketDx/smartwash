@@ -17,6 +17,7 @@ import { tarifasDeHoy } from "../cotizacion";
 import { COLOR_ESTADO } from "../tabla-ordenes";
 import AgregarPrenda from "./agregar-prenda";
 import AgregarServicio from "./agregar-servicio";
+import CambiarEstado from "./cambiar-estado";
 
 const ESTADOS_QUE_ADMITEN_LINEAS: EstadoOrden[] = ["En espera", "Recibida", "Clasificada"];
 
@@ -99,6 +100,8 @@ export default async function OrdenPage({
           </p>
         </div>
       )}
+
+      <CambiarEstado orden={orden} usuario={user} />
 
       <ClayCard className="mb-6">
         <dl className="grid grid-cols-2 gap-5 sm:grid-cols-4">
