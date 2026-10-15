@@ -1,10 +1,17 @@
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework import generics, serializers, status
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from core.permissions import AdministradorORecepcionista, RecepcionEscribe
+from accounts.models import User
+from core.permissions import (
+    AdministradorORecepcionista,
+    OperarioSoloSusOrdenes,
+    RecepcionEscribe,
+    SoloOperario,
+)
 
 from .historial import operacion_sobre_orden, registrar_evento
 from .models import HistorialOrden, Orden, Prenda
@@ -14,6 +21,7 @@ from .serializers import (
     EntregaSerializer,
     HistorialOrdenSerializer,
     OperarioSerializer,
+    OrdenBandejaSerializer,
     OrdenSerializer,
     PrendaEntradaSerializer,
     agregar_prenda,
@@ -38,14 +46,37 @@ class OrdenListCreateView(generics.ListCreateAPIView):
     permission_classes = [RecepcionEscribe]
 
     def get_queryset(self):
-        return ordenes_con_detalle()
+        ordenes = ordenes_con_detalle()
+        if self.request.user.rol == User.Rol.OPERARIO:
+            return ordenes.filter(operario=self.request.user)
+        return ordenes
 
 
 class OrdenDetailView(generics.RetrieveAPIView):
     serializer_class = OrdenSerializer
+    permission_classes = [IsAuthenticated, OperarioSoloSusOrdenes]
 
     def get_queryset(self):
         return ordenes_con_detalle()
+
+
+class BandejaOperarioView(generics.ListAPIView):
+    serializer_class = OrdenBandejaSerializer
+    permission_classes = [SoloOperario]
+    # Sin operario no hay "En espera"; se excluye igual por si un camino futuro lo permite.
+    ESTADOS_FUERA_DE_BANDEJA = (
+        Orden.Estado.EN_ESPERA,
+        Orden.Estado.ENTREGADA,
+        Orden.Estado.CANCELADA,
+    )
+
+    def get_queryset(self):
+        return (
+            Orden.objects.filter(operario=self.request.user)
+            .exclude(estado__in=self.ESTADOS_FUERA_DE_BANDEJA)
+            .prefetch_related("prendas__tipo_prenda", "prendas__servicios__tarifa__servicio")
+            .order_by("fecha_estimada_entrega", "creado_en")
+        )
 
 
 def orden_para_editar(pk):
