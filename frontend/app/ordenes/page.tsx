@@ -1,8 +1,9 @@
 import { cookies } from "next/headers";
+import Link from "next/link";
 import { redirect } from "next/navigation";
 
 import { getCurrentUser, getOrdenes } from "@/lib/api";
-import { AvisoPendiente, Encabezado } from "../components/ui/clay";
+import { ClayCard, Encabezado, clayBtnClass } from "../components/ui/clay";
 import TablaOrdenes from "./tabla-ordenes";
 
 export default async function OrdenesPage() {
@@ -14,16 +15,26 @@ export default async function OrdenesPage() {
 
   return (
     <main className="mx-auto max-w-5xl px-4 py-8 sm:px-8 sm:py-12">
-      <Encabezado eyebrow="Operacion · EP04" titulo="Ordenes">
+      <Encabezado
+        eyebrow="Operacion · EP04"
+        titulo="Ordenes"
+        acciones={
+          user.rol !== "operario" && (
+            <Link href="/ordenes/nueva" className={clayBtnClass()}>
+              Nueva orden
+            </Link>
+          )
+        }
+      >
         Sigue el estado de las ordenes en curso (EP04/EP05).
       </Encabezado>
 
       {ordenes === null ? (
-        <AvisoPendiente>
-          GET /api/ordenes todavia no existe: la app ordenes solo tiene los
-          modelos Orden, Prenda y OrdenServicio. Esta pantalla ya esta lista
-          para listar en cuanto se agreguen el serializer y el viewset.
-        </AvisoPendiente>
+        <ClayCard>
+          <p className="text-sm text-(--sw-ink-soft)">
+            No se pudieron cargar las ordenes. Verifica que el backend este en ejecucion.
+          </p>
+        </ClayCard>
       ) : (
         <TablaOrdenes ordenes={ordenes} />
       )}

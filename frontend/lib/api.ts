@@ -111,9 +111,8 @@ export async function actuarComo(username: string): Promise<User | null> {
   return response.ok ? ((await response.json()) as User) : null;
 }
 
-/* Clientes, catalogo, fidelizacion, usuarios y auditoria ya tienen endpoints en
- * Django. Ordenes, rastreo publico y PQRS todavia no: sus funciones devuelven
- * null o fallan sin romper la pantalla. */
+/* Rastreo publico y PQRS todavia no tienen endpoints en Django: sus funciones
+ * devuelven null o fallan sin romper la pantalla. */
 
 /** GET server-side generico: reenvia cookies y nunca lanza. Un backend caido
  * y un endpoint que aun no existe (404) se ven igual desde la pagina: null. */
@@ -383,19 +382,89 @@ export type EstadoOrden =
   | "Cancelada"
   | "En espera";
 
+export type ServicioDePrenda = {
+  id: number;
+  servicio: number;
+  servicio_nombre: string;
+  unidad_cobro: UnidadCobro;
+  valor_aplicado: string;
+};
+
+export type PrendaDeOrden = {
+  id: number;
+  tipo_prenda: number;
+  tipo_prenda_nombre: string;
+  cantidad: number;
+  peso: string | null;
+  talla: string;
+  genero: string;
+  color: string;
+  estado_inicial: string;
+  servicios: ServicioDePrenda[];
+};
+
+/** Lo que devuelve OrdenSerializer. Los montos llegan como texto decimal. */
 export type Orden = {
   id: number;
   codigo: string;
   cliente: number;
+  cliente_nombre: string;
+  recepcionista: number;
+  operario: number | null;
   estado: EstadoOrden;
   estado_pago: "Pendiente" | "Parcial" | "Pagada";
+  subtotal: string;
+  descuento: string;
+  valor_total: string;
+  abono_requerido: string;
+  duracion_estimada_dias: number;
   fecha_estimada_entrega: string | null;
   fecha_entrega: string | null;
-  valor_total: string;
+  creado_en: string;
+  detalle_prendas: PrendaDeOrden[];
+  total_pagado: string;
+  saldo_pendiente: string;
+  tiene_abono: boolean;
+  pago_completo: boolean;
+};
+
+/** Una linea de prenda tal como la recibe POST /ordenes y POST /ordenes/{id}/prendas. */
+export type PrendaFormulario = {
+  tipo_prenda: number;
+  cantidad: number;
+  peso: string | null;
+  talla: string;
+  genero: string;
+  color: string;
+  estado_inicial: string;
+  servicios: number[];
 };
 
 export async function getOrdenes(cookieStore: CookieStore): Promise<Orden[] | null> {
   return fetchBackend<Orden[]>("/ordenes", cookieStore);
+}
+
+export async function getOrden(id: number, cookieStore: CookieStore): Promise<Orden | null> {
+  return fetchBackend<Orden>(`/ordenes/${id}`, cookieStore);
+}
+
+export async function crearOrden(cliente: number, prendas: PrendaFormulario[]): Promise<Response> {
+  return api("/ordenes", { method: "POST", body: { cliente, prendas } });
+}
+
+export async function agregarPrendaAOrden(id: number, prenda: PrendaFormulario): Promise<Response> {
+  return api(`/ordenes/${id}/prendas`, { method: "POST", body: prenda });
+}
+
+export async function agregarServicioAPrenda(
+  id: number,
+  prendaId: number,
+  servicio: number,
+): Promise<Response> {
+  return api(`/ordenes/${id}/prendas/${prendaId}/servicios`, {
+    method: "POST",
+    body: { servicio },
+  });
 }
 
 /* ------------------------- Rastreo publico de pedidos (sin cuenta de cliente) ------------------------- *
