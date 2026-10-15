@@ -467,6 +467,12 @@ export async function agregarServicioAPrenda(
   });
 }
 
+/** Avanza la orden por el flujo (HU14). El backend valida la transicion, el
+ * abono y que el operario sea el asignado; "Entregada" va por /entrega (HU12). */
+export async function cambiarEstadoOrden(id: number, estado: EstadoOrden): Promise<Response> {
+  return api(`/ordenes/${id}/estado`, { method: "POST", body: { estado } });
+}
+
 /* ------------------------- Rastreo publico de pedidos (sin cuenta de cliente) ------------------------- *
  * Orden.codigo se diseno para esto: "codigo de rastreo... publico" (ver
  * backend/ordenes/models.py). No hay rol "cliente" en accounts.User, asi que
