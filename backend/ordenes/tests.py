@@ -947,12 +947,13 @@ class CambiarEstadoApiTests(CatalogoDePruebaMixin, APITestCase):
         self.client.force_authenticate(usuario)
         return self.client.post(self.url, {"estado": estado}, format="json")
 
-    def test_el_operario_asignado_recorre_la_secuencia_y_queda_el_historial(self):
+    def test_la_recepcionista_clasifica_y_el_operario_asignado_recorre_el_resto(self):
         self.con_abono(self.operario)
+        self.assertEqual(self.cambiar(self.recepcionista, "Clasificada").status_code, 200)
         previo = self.orden.historial.count()
 
-        anterior = "Recibida"
-        for estado in self.SECUENCIA:
+        anterior = "Clasificada"
+        for estado in self.SECUENCIA[1:]:
             response = self.cambiar(self.operario, estado)
             self.assertEqual(response.status_code, 200, response.json())
             evento = self.orden.historial.last()
@@ -961,20 +962,31 @@ class CambiarEstadoApiTests(CatalogoDePruebaMixin, APITestCase):
             self.assertEqual(evento.detalle, f"{anterior} → {estado}")
             anterior = estado
 
-        self.assertEqual(self.orden.historial.count(), previo + len(self.SECUENCIA))
+        self.assertEqual(self.orden.historial.count(), previo + len(self.SECUENCIA) - 1)
         self.orden.refresh_from_db()
         self.assertEqual(self.orden.estado, Orden.Estado.LISTA)
 
-    def test_el_operario_no_cambia_ordenes_de_otro_ni_sin_asignar(self):
-        self.con_abono(self.otro_operario)
+    def test_el_operario_asignado_no_clasifica_la_orden(self):
+        self.con_abono(self.operario)
         previo = self.orden.historial.count()
-        self.assertEqual(self.cambiar(self.operario, "Clasificada").status_code, 403)
 
-        Orden.objects.filter(pk=self.orden.pk).update(operario=None)
         self.assertEqual(self.cambiar(self.operario, "Clasificada").status_code, 403)
 
         self.orden.refresh_from_db()
         self.assertEqual(self.orden.estado, Orden.Estado.RECIBIDA)
+        self.assertEqual(self.orden.historial.count(), previo)
+
+    def test_el_operario_no_cambia_ordenes_de_otro_ni_sin_asignar(self):
+        self.con_abono(self.otro_operario)
+        self.poner_estado(Orden.Estado.CLASIFICADA)
+        previo = self.orden.historial.count()
+        self.assertEqual(self.cambiar(self.operario, "En proceso").status_code, 403)
+
+        Orden.objects.filter(pk=self.orden.pk).update(operario=None)
+        self.assertEqual(self.cambiar(self.operario, "En proceso").status_code, 403)
+
+        self.orden.refresh_from_db()
+        self.assertEqual(self.orden.estado, Orden.Estado.CLASIFICADA)
         self.assertEqual(self.orden.historial.count(), previo)
 
     def test_el_administrador_cambia_cualquier_orden(self):
@@ -985,10 +997,22 @@ class CambiarEstadoApiTests(CatalogoDePruebaMixin, APITestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(self.orden.historial.last().usuario, self.administrador)
 
-    def test_la_recepcionista_no_cambia_estados(self):
+    def test_la_recepcionista_no_cambia_estados_posteriores_a_clasificada(self):
         self.con_abono(self.operario)
+        self.poner_estado(Orden.Estado.CLASIFICADA)
 
-        self.assertEqual(self.cambiar(self.recepcionista, "Clasificada").status_code, 403)
+        self.assertEqual(self.cambiar(self.recepcionista, "En proceso").status_code, 403)
+
+    def test_una_orden_sin_operario_no_pasa_a_en_proceso(self):
+        self.con_abono()
+        self.poner_estado(Orden.Estado.CLASIFICADA)
+
+        response = self.cambiar(self.administrador, "En proceso")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("operario asignado", str(response.json()))
+        self.orden.refresh_from_db()
+        self.assertEqual(self.orden.estado, Orden.Estado.CLASIFICADA)
 
     def test_una_orden_en_espera_no_se_mueve(self):
         response = self.cambiar(self.administrador, "Clasificada")
@@ -1001,7 +1025,7 @@ class CambiarEstadoApiTests(CatalogoDePruebaMixin, APITestCase):
     def test_no_se_saltan_pasos_ni_se_retrocede(self):
         self.con_abono(self.operario)
 
-        salto = self.cambiar(self.operario, "Lista para entrega")
+        salto = self.cambiar(self.administrador, "Lista para entrega")
         self.assertEqual(salto.status_code, 400)
         self.assertIn('No se puede pasar de "Recibida" a "Lista para entrega"', str(salto.json()))
 
@@ -1042,7 +1066,7 @@ class CambiarEstadoApiTests(CatalogoDePruebaMixin, APITestCase):
             mock.patch.object(Orden, "save", side_effect=OperationalError("sin conexion")),
             self.assertLogs("ordenes.historial", level="ERROR"),
         ):
-            response = self.cambiar(self.operario, "Clasificada")
+            response = self.cambiar(self.recepcionista, "Clasificada")
 
         self.assertEqual(response.status_code, 503)
         self.orden.refresh_from_db()

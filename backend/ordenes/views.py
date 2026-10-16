@@ -6,11 +6,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from accounts.models import User
-from core.permissions import (
-    AdministradorOOperario,
-    AdministradorORecepcionista,
-    RecepcionEscribe,
-)
+from core.permissions import AdministradorORecepcionista, RecepcionEscribe
 
 from .historial import operacion_sobre_orden, registrar_evento
 from .models import HistorialOrden, Orden, Prenda
@@ -128,16 +124,22 @@ class RegistrarEntregaView(APIView):
         return Response(OrdenSerializer(ordenes_con_detalle().get(pk=orden.pk)).data)
 
 
-class CambiarEstadoView(APIView):
-    permission_classes = [AdministradorOOperario]
+def puede_cambiar_estado(usuario, orden):
+    if usuario.rol == User.Rol.ADMINISTRADOR:
+        return True
+    if orden.estado == Orden.Estado.RECIBIDA:
+        return usuario.rol == User.Rol.RECEPCIONISTA
+    return usuario.rol == User.Rol.OPERARIO and orden.operario_id == usuario.pk
 
+
+class CambiarEstadoView(APIView):
     def post(self, request, pk):
         entrada = CambioEstadoSerializer(data=request.data)
         entrada.is_valid(raise_exception=True)
         nuevo = entrada.validated_data["estado"]
         with operacion_sobre_orden():
             orden = get_object_or_404(Orden.objects.select_for_update(), pk=pk)
-            if request.user.rol == User.Rol.OPERARIO and orden.operario_id != request.user.pk:
+            if not puede_cambiar_estado(request.user, orden):
                 raise PermissionDenied("No tienes permiso para cambiar el estado de esta orden.")
             anterior = orden.estado
             orden.cambiar_estado(nuevo)

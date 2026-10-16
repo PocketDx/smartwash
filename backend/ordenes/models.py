@@ -170,6 +170,10 @@ class Orden(ModeloConAutoria):
             raise ValidationError(
                 {"estado": f'No se puede pasar de "{self.estado}" a "{nuevo}".'}
             )
+        if nuevo == self.Estado.EN_PROCESO and self.operario_id is None:
+            raise ValidationError(
+                {"operario": "La orden necesita un operario asignado para pasar a En proceso."}
+            )
         # Un reproceso no cuesta: solo se cuenta.
         if self.estado == self.Estado.CONTROL_CALIDAD and nuevo == self.Estado.EN_PROCESO:
             self.numero_reprocesos += 1
