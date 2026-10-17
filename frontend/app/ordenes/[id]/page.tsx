@@ -1,0 +1,199 @@
+import { cookies } from "next/headers";
+import Link from "next/link";
+import { redirect } from "next/navigation";
+import type { ReactNode } from "react";
+
+import {
+  getCurrentUser,
+  getOrden,
+  getServicios,
+  getTarifas,
+  getTiposPrenda,
+  type EstadoOrden,
+} from "@/lib/api";
+import { formatCOP, formatFecha } from "@/lib/format";
+import { ClayBadge, ClayCard, Encabezado } from "../../components/ui/clay";
+import { tarifasDeHoy } from "../cotizacion";
+import { COLOR_ESTADO } from "../tabla-ordenes";
+import AgregarPrenda from "./agregar-prenda";
+import AgregarServicio from "./agregar-servicio";
+import CambiarEstado from "./cambiar-estado";
+
+const ESTADOS_QUE_ADMITEN_LINEAS: EstadoOrden[] = ["En espera", "Recibida", "Clasificada"];
+
+function Dato({ etiqueta, children }: { etiqueta: string; children: ReactNode }) {
+  return (
+    <div>
+      <dt className="text-xs font-semibold tracking-wide text-(--sw-ink-soft) uppercase">{etiqueta}</dt>
+      <dd className="mt-1 text-sm font-semibold text-(--sw-ink) tabular-nums">{children}</dd>
+    </div>
+  );
+}
+
+export default async function OrdenPage({
+  params,
+  searchParams,
+}: {
+  params: Promise<{ id: string }>;
+  searchParams: Promise<{ registrada?: string }>;
+}) {
+  const cookieStore = await cookies();
+  const user = await getCurrentUser(cookieStore);
+  if (!user) redirect("/login");
+
+  const id = Number((await params).id);
+  const { registrada } = await searchParams;
+  const puedeEditar = user.rol !== "operario";
+
+  const [orden, tiposPrenda, servicios, tarifas] = await Promise.all([
+    getOrden(id, cookieStore),
+    puedeEditar ? getTiposPrenda(cookieStore) : null,
+    puedeEditar ? getServicios(cookieStore) : null,
+    puedeEditar ? getTarifas(cookieStore, true) : null,
+  ]);
+
+  if (orden === null) {
+    return (
+      <main className="mx-auto max-w-4xl px-4 py-8 sm:px-8 sm:py-12">
+        <Link href="/ordenes" className="text-sm text-(--sw-ink-soft) hover:underline">
+          ← Ordenes
+        </Link>
+        <ClayCard className="mt-6">
+          <p className="text-sm text-(--sw-ink-soft)">
+            No se encontro la orden o no se pudo cargar. Verifica que el backend este en ejecucion.
+          </p>
+        </ClayCard>
+      </main>
+    );
+  }
+
+  const tarifasVigentes = tarifas ? tarifasDeHoy(tarifas) : [];
+  const admiteLineas = puedeEditar && ESTADOS_QUE_ADMITEN_LINEAS.includes(orden.estado);
+  const conCatalogo = admiteLineas && tiposPrenda !== null && servicios !== null;
+
+  return (
+    <main className="mx-auto max-w-4xl px-4 py-8 sm:px-8 sm:py-12">
+      <Link href="/ordenes" className="text-sm text-(--sw-ink-soft) hover:underline">
+        ← Ordenes
+      </Link>
+      <Encabezado
+        eyebrow="Orden"
+        titulo={orden.codigo}
+        acciones={
+          <div className="flex flex-wrap gap-2">
+            <ClayBadge color={COLOR_ESTADO[orden.estado]}>{orden.estado}</ClayBadge>
+            <ClayBadge color={orden.estado_pago === "Pagada" ? "mint" : "peach"}>
+              Pago {orden.estado_pago.toLowerCase()}
+            </ClayBadge>
+          </div>
+        }
+      >
+        {orden.cliente_nombre}
+      </Encabezado>
+
+      {registrada && (
+        <div role="status" className="clay-sm mb-6 border-l-8 border-l-(--sw-mint) p-4 text-sm">
+          <p className="font-semibold text-(--sw-ink)">Orden registrada</p>
+          <p className="mt-1 text-(--sw-ink-soft)">
+            Queda &quot;{orden.estado}&quot;. Pasa a &quot;Recibida&quot; cuando se registre el abono
+            de {formatCOP(orden.abono_requerido)}.
+          </p>
+        </div>
+      )}
+
+      <CambiarEstado orden={orden} usuario={user} />
+
+      <ClayCard className="mb-6">
+        <dl className="grid grid-cols-2 gap-5 sm:grid-cols-4">
+          <Dato etiqueta="Subtotal">{formatCOP(orden.subtotal)}</Dato>
+          <Dato etiqueta="Descuento fidelizacion">
+            {Number(orden.descuento) > 0 ? `− ${formatCOP(orden.descuento)}` : formatCOP(0)}
+          </Dato>
+          <Dato etiqueta="Valor total">{formatCOP(orden.valor_total)}</Dato>
+          <Dato etiqueta="Abono requerido (30 %)">{formatCOP(orden.abono_requerido)}</Dato>
+          <Dato etiqueta="Pagado">{formatCOP(orden.total_pagado)}</Dato>
+          <Dato etiqueta="Saldo pendiente">{formatCOP(orden.saldo_pendiente)}</Dato>
+          <Dato etiqueta="Duracion estimada">
+            {orden.duracion_estimada_dias} {orden.duracion_estimada_dias === 1 ? "dia habil" : "dias habiles"}
+          </Dato>
+          <Dato etiqueta="Fecha estimada de entrega">
+            {orden.fecha_estimada_entrega ? (
+              formatFecha(orden.fecha_estimada_entrega)
+            ) : (
+              <span className="font-normal text-(--sw-ink-soft)">Se calcula al registrar el abono</span>
+            )}
+          </Dato>
+        </dl>
+        {orden.tiene_abono && admiteLineas && (
+          <p className="mt-4 text-xs text-(--sw-ink-soft)">
+            La orden ya alcanzo el abono minimo: si agregas prendas o servicios no se pide otro abono, la
+            diferencia se paga al entregar.
+          </p>
+        )}
+      </ClayCard>
+
+      <h2 className="mb-3 text-lg font-bold text-(--sw-ink)">Prendas</h2>
+      <div className="flex flex-col gap-3">
+        {orden.detalle_prendas.map((prenda) => {
+          const detalles = [
+            prenda.peso && `${prenda.peso} kg`,
+            prenda.talla && `talla ${prenda.talla}`,
+            prenda.genero,
+            prenda.color,
+          ].filter(Boolean);
+          return (
+            <ClayCard key={prenda.id} className="p-4">
+              <p className="font-semibold text-(--sw-ink)">
+                {prenda.cantidad} × {prenda.tipo_prenda_nombre}
+              </p>
+              {detalles.length > 0 && (
+                <p className="mt-0.5 text-xs text-(--sw-ink-soft)">{detalles.join(" · ")}</p>
+              )}
+              {prenda.estado_inicial && (
+                <p className="mt-0.5 text-xs text-(--sw-ink-soft)">Al recibir: {prenda.estado_inicial}</p>
+              )}
+              <ul className="mt-3 flex flex-col gap-1 text-sm">
+                {prenda.servicios.map((s) => (
+                  <li key={s.id} className="flex justify-between gap-4">
+                    <span className="text-(--sw-ink)">
+                      {s.servicio_nombre}{" "}
+                      <span className="text-xs text-(--sw-ink-soft)">(por {s.unidad_cobro})</span>
+                    </span>
+                    <span className="font-semibold text-(--sw-ink) tabular-nums">
+                      {formatCOP(s.valor_aplicado)}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+              {conCatalogo && servicios && (
+                <AgregarServicio
+                  ordenId={orden.id}
+                  prenda={prenda}
+                  servicios={servicios}
+                  tarifas={tarifasVigentes}
+                />
+              )}
+            </ClayCard>
+          );
+        })}
+      </div>
+
+      {conCatalogo && tiposPrenda && servicios && (
+        <div className="mt-4">
+          <AgregarPrenda
+            ordenId={orden.id}
+            tiposPrenda={tiposPrenda}
+            servicios={servicios}
+            tarifas={tarifasVigentes}
+          />
+        </div>
+      )}
+      {puedeEditar && !ESTADOS_QUE_ADMITEN_LINEAS.includes(orden.estado) && (
+        <p className="mt-4 text-sm text-(--sw-ink-soft)">
+          La orden esta &quot;{orden.estado}&quot;: ya no admite prendas ni servicios. Lo adicional va en otra
+          orden.
+        </p>
+      )}
+    </main>
+  );
+}

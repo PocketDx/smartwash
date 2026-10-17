@@ -3,6 +3,7 @@ from decimal import Decimal
 from django.utils import timezone
 from rest_framework import serializers
 
+from accounts.models import User
 from catalogo.models import Servicio, Tarifa, TipoPrenda
 from clientes.models import Cliente
 
@@ -15,6 +16,12 @@ ESTADOS_QUE_ADMITEN_LINEAS = (
     Orden.Estado.RECIBIDA,
     Orden.Estado.CLASIFICADA,
 )
+ESTADOS_REASIGNABLES = (Orden.Estado.RECIBIDA, Orden.Estado.CLASIFICADA)
+ESTADOS_CON_TRABAJO_EN_CURSO = (Orden.Estado.EN_PROCESO, Orden.Estado.CONTROL_CALIDAD)
+
+
+def nombre_usuario(usuario):
+    return usuario.get_full_name() or usuario.username
 
 
 class HistorialOrdenSerializer(serializers.ModelSerializer):
@@ -221,6 +228,81 @@ class OrdenSerializer(serializers.ModelSerializer):
                 f"Orden registrada para {orden.cliente} por ${orden.valor_total}",
             )
         return orden
+
+
+def operarios_activos():
+    return User.objects.filter(rol=User.Rol.OPERARIO, is_active=True)
+
+
+class OperarioSerializer(serializers.ModelSerializer):
+    nombre = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = ("id", "username", "nombre")
+
+    def get_nombre(self, usuario) -> str:
+        return nombre_usuario(usuario)
+
+
+class AsignacionSerializer(serializers.Serializer):
+    # Un id de otro rol, inactivo o inexistente recibe el mismo mensaje: la
+    # respuesta no revela que cuentas existen.
+    operario = serializers.PrimaryKeyRelatedField(
+        queryset=operarios_activos(),
+        error_messages={
+            "does_not_exist": "Selecciona un operario activo.",
+            "incorrect_type": "Selecciona un operario activo.",
+            "required": "Selecciona el operario.",
+            "null": "Selecciona el operario.",
+        },
+    )
+
+
+def asignar_operario(orden, operario, usuario):
+    """Asigna o reasigna la orden y devuelve el evento para el historial.
+
+    Desde "En proceso" la orden queda fija con su operario; solo el
+    administrador la mueve, y solo si ese operario ya no esta activo.
+    """
+    orden.exigir_abono()
+    if orden.estado == Orden.Estado.EN_ESPERA:
+        raise serializers.ValidationError(
+            {"estado": 'La orden esta "En espera"; no se puede asignar a un operario.'}
+        )
+    anterior = orden.operario
+    if anterior == operario:
+        raise serializers.ValidationError(
+            {"operario": "La orden ya esta asignada a ese operario."}
+        )
+    operario_desactivado = anterior is None or not anterior.is_active
+    excepcion_admin = (
+        orden.estado in ESTADOS_CON_TRABAJO_EN_CURSO
+        and usuario.rol == User.Rol.ADMINISTRADOR
+        and operario_desactivado
+    )
+    if orden.estado in ESTADOS_CON_TRABAJO_EN_CURSO and not excepcion_admin:
+        raise serializers.ValidationError(
+            {
+                "estado": f'La orden esta "{orden.estado}" y queda fija con su operario. '
+                "Solo el administrador puede reasignarla si el operario fue desactivado."
+            }
+        )
+    if orden.estado not in ESTADOS_REASIGNABLES and not excepcion_admin:
+        raise serializers.ValidationError(
+            {"estado": f'La orden esta "{orden.estado}"; no se puede asignar ni reasignar.'}
+        )
+
+    orden.operario = operario
+    orden.registrar_autoria(usuario)
+    orden.save()
+
+    if anterior is None:
+        return Evento.ASIGNACION, f"Asignada a {nombre_usuario(operario)}"
+    detalle = f"{nombre_usuario(anterior)} → {nombre_usuario(operario)}"
+    if excepcion_admin:
+        detalle += " (el operario anterior fue desactivado)"
+    return Evento.REASIGNACION, detalle
 
 
 class AgregarServicioSerializer(serializers.Serializer):
