@@ -317,6 +317,10 @@ class AgregarServicioSerializer(serializers.Serializer):
         return tarifa
 
 
+class CambioEstadoSerializer(serializers.Serializer):
+    estado = serializers.ChoiceField(choices=Orden.Estado.choices)
+
+
 class VerificacionPrendaSerializer(serializers.Serializer):
     prenda = serializers.IntegerField()
     coincide = serializers.BooleanField()

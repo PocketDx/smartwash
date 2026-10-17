@@ -4,6 +4,7 @@ from .views import (
     AgregarPrendaView,
     AgregarServicioView,
     AsignarOperarioView,
+    CambiarEstadoView,
     HistorialOrdenView,
     OperariosActivosView,
     OrdenDetailView,
@@ -24,6 +25,7 @@ urlpatterns = [
         "ordenes/<int:pk>/asignacion", AsignarOperarioView.as_view(), name="orden-asignacion"
     ),
     path("ordenes/<int:pk>/entrega", RegistrarEntregaView.as_view(), name="orden-entrega"),
+    path("ordenes/<int:pk>/estado", CambiarEstadoView.as_view(), name="orden-estado"),
     path("ordenes/<int:pk>/historial", HistorialOrdenView.as_view(), name="orden-historial"),
     path("operarios", OperariosActivosView.as_view(), name="operarios-activos"),
 ]

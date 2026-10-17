@@ -48,6 +48,14 @@ class Orden(ModeloConAutoria):
         CANCELADA = "Cancelada", "Cancelada"
         EN_ESPERA = "En espera", "En espera"
 
+    # Entregada no figura: solo se llega por /entrega, que verifica las prendas.
+    TRANSICIONES = {
+        Estado.RECIBIDA: (Estado.CLASIFICADA,),
+        Estado.CLASIFICADA: (Estado.EN_PROCESO,),
+        Estado.EN_PROCESO: (Estado.CONTROL_CALIDAD,),
+        Estado.CONTROL_CALIDAD: (Estado.LISTA, Estado.EN_PROCESO),
+    }
+
     class EstadoPago(models.TextChoices):
         PENDIENTE = "Pendiente", "Pendiente"
         PARCIAL = "Parcial", "Parcial"
@@ -148,6 +156,28 @@ class Orden(ModeloConAutoria):
                 f"antes de asignarse a un operario (faltan ${falta})."
             }
         )
+
+    def cambiar_estado(self, nuevo):
+        if self.estado == self.Estado.EN_ESPERA:
+            falta = max(self.abono_requerido - self.total_pagado(), Decimal("0"))
+            raise ValidationError(
+                {
+                    "estado": "La orden esta en espera: requiere un abono minimo de "
+                    f"${self.abono_requerido} (faltan ${falta})."
+                }
+            )
+        if nuevo not in self.TRANSICIONES.get(self.estado, ()):
+            raise ValidationError(
+                {"estado": f'No se puede pasar de "{self.estado}" a "{nuevo}".'}
+            )
+        if nuevo == self.Estado.EN_PROCESO and self.operario_id is None:
+            raise ValidationError(
+                {"operario": "La orden necesita un operario asignado para pasar a En proceso."}
+            )
+        # Un reproceso no cuesta: solo se cuenta.
+        if self.estado == self.Estado.CONTROL_CALIDAD and nuevo == self.Estado.EN_PROCESO:
+            self.numero_reprocesos += 1
+        self.estado = nuevo
 
     def total_pagado(self):
         if self.pk is None:
