@@ -30,3 +30,17 @@ class RecepcionEscribe(BasePermission):
             User.Rol.ADMINISTRADOR,
             User.Rol.RECEPCIONISTA,
         )
+
+
+class SoloOperario(BasePermission):
+    def has_permission(self, request, view):
+        return request.user.is_authenticated and request.user.rol == User.Rol.OPERARIO
+
+
+class OperarioSoloSusOrdenes(BasePermission):
+    """El operario solo accede a las ordenes que tiene asignadas; los demas roles, a todas."""
+
+    def has_object_permission(self, request, view, obj):
+        if request.user.rol != User.Rol.OPERARIO:
+            return True
+        return obj.operario_id == request.user.pk

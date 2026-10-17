@@ -4,6 +4,7 @@ from .views import (
     AgregarPrendaView,
     AgregarServicioView,
     AsignarOperarioView,
+    BandejaOperarioView,
     CambiarEstadoView,
     HistorialOrdenView,
     OperariosActivosView,
@@ -14,6 +15,7 @@ from .views import (
 
 urlpatterns = [
     path("ordenes", OrdenListCreateView.as_view(), name="ordenes"),
+    path("ordenes/bandeja", BandejaOperarioView.as_view(), name="ordenes-bandeja"),
     path("ordenes/<int:pk>", OrdenDetailView.as_view(), name="orden-detalle"),
     path("ordenes/<int:pk>/prendas", AgregarPrendaView.as_view(), name="orden-prendas"),
     path(

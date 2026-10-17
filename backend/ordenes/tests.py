@@ -1282,3 +1282,166 @@ class AsignarOperarioApiTests(CatalogoDePruebaMixin, APITestCase):
         self.client.force_authenticate(self.operario)
         self.assertEqual(self.client.get("/api/operarios").status_code, 403)
 
+
+
+class BandejaOperarioApiTests(CatalogoDePruebaMixin, APITestCase):
+    def setUp(self):
+        self.crear_catalogo()
+        self.operario = User.objects.create_user(
+            username="op1", password="x", rol=User.Rol.OPERARIO
+        )
+        self.otro_operario = User.objects.create_user(
+            username="op2", password="x", rol=User.Rol.OPERARIO
+        )
+
+    def orden_asignada(self, operario):
+        self.client.force_authenticate(self.recepcionista)
+        pk = self.registrar(self.prenda(self.lavado, self.planchado, color="azul")).json()["id"]
+        self.client.post(
+            f"/api/ordenes/{pk}/pagos", {"monto": "4800", "metodo": "efectivo"}, format="json"
+        )
+        self.client.post(f"/api/ordenes/{pk}/asignacion", {"operario": operario.pk}, format="json")
+        return Orden.objects.get(pk=pk)
+
+    def bandeja(self, usuario=None):
+        self.client.force_authenticate(usuario or self.operario)
+        return self.client.get("/api/ordenes/bandeja")
+
+    def test_el_operario_ve_solo_sus_ordenes_pendientes_con_codigo_estado_prendas_y_fecha(self):
+        mia = self.orden_asignada(self.operario)
+        self.orden_asignada(self.otro_operario)
+
+        response = self.bandeja()
+
+        self.assertEqual(response.status_code, 200)
+        datos = response.json()
+        self.assertEqual([o["id"] for o in datos], [mia.pk])
+        orden = datos[0]
+        self.assertEqual(orden["codigo"], mia.codigo)
+        self.assertEqual(orden["estado"], Orden.Estado.RECIBIDA)
+        self.assertEqual(orden["fecha_estimada_entrega"], mia.fecha_estimada_entrega.isoformat())
+        prenda = orden["prendas"][0]
+        self.assertEqual(prenda["tipo_prenda_nombre"], "Camisa")
+        self.assertEqual(prenda["cantidad"], 3)
+        self.assertEqual(prenda["color"], "azul")
+        self.assertEqual(prenda["servicios"], ["Lavado", "Planchado"])
+
+    def test_la_bandeja_no_expone_cliente_ni_valores(self):
+        self.orden_asignada(self.operario)
+
+        orden = self.bandeja().json()[0]
+
+        for campo in ("cliente", "cliente_nombre", "valor_total", "total_pagado", "saldo_pendiente"):
+            self.assertNotIn(campo, orden)
+        self.assertNotIn("valor_aplicado", str(orden))
+
+    def test_sin_ordenes_asignadas_la_bandeja_esta_vacia(self):
+        self.orden_asignada(self.otro_operario)
+
+        response = self.bandeja()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), [])
+
+    def test_no_muestra_entregadas_ni_canceladas(self):
+        pendiente = self.orden_asignada(self.operario)
+        for estado in (Orden.Estado.ENTREGADA, Orden.Estado.CANCELADA):
+            orden = self.orden_asignada(self.operario)
+            Orden.objects.filter(pk=orden.pk).update(estado=estado)
+
+        self.assertEqual([o["id"] for o in self.bandeja().json()], [pendiente.pk])
+
+    def test_muestra_las_ordenes_en_cualquier_estado_pendiente(self):
+        estados = (
+            Orden.Estado.RECIBIDA,
+            Orden.Estado.CLASIFICADA,
+            Orden.Estado.EN_PROCESO,
+            Orden.Estado.CONTROL_CALIDAD,
+            Orden.Estado.LISTA,
+        )
+        for estado in estados:
+            orden = self.orden_asignada(self.operario)
+            Orden.objects.filter(pk=orden.pk).update(estado=estado)
+
+        self.assertCountEqual([o["estado"] for o in self.bandeja().json()], estados)
+
+    def test_las_ordenes_en_espera_no_aparecen(self):
+        self.client.force_authenticate(self.recepcionista)
+        self.registrar(self.prenda(self.lavado))
+
+        self.assertEqual(self.bandeja().json(), [])
+
+    def test_toda_orden_de_la_bandeja_tiene_fecha_estimada(self):
+        self.orden_asignada(self.operario)
+        self.orden_asignada(self.operario)
+
+        self.assertTrue(all(o["fecha_estimada_entrega"] for o in self.bandeja().json()))
+
+    def test_una_orden_reasignada_pasa_a_la_bandeja_del_nuevo_operario(self):
+        orden = self.orden_asignada(self.operario)
+        self.client.post(
+            f"/api/ordenes/{orden.pk}/asignacion", {"operario": self.otro_operario.pk}, format="json"
+        )
+
+        self.assertEqual(self.bandeja().json(), [])
+        self.assertEqual([o["id"] for o in self.bandeja(self.otro_operario).json()], [orden.pk])
+
+    def test_el_operario_no_abre_por_la_api_una_orden_ajena(self):
+        ajena = self.orden_asignada(self.otro_operario)
+        sin_asignar = self.registrar(self.prenda(self.lavado)).json()["id"]
+        self.client.force_authenticate(self.operario)
+
+        self.assertEqual(self.client.get(f"/api/ordenes/{ajena.pk}").status_code, 403)
+        self.assertEqual(self.client.get(f"/api/ordenes/{sin_asignar}").status_code, 403)
+
+    def test_el_operario_si_abre_su_propia_orden(self):
+        mia = self.orden_asignada(self.operario)
+        self.client.force_authenticate(self.operario)
+
+        self.assertEqual(self.client.get(f"/api/ordenes/{mia.pk}").status_code, 200)
+
+    def test_el_listado_general_solo_le_muestra_al_operario_sus_ordenes(self):
+        mia = self.orden_asignada(self.operario)
+        self.orden_asignada(self.otro_operario)
+        self.client.force_authenticate(self.operario)
+
+        response = self.client.get("/api/ordenes")
+
+        self.assertEqual([o["id"] for o in response.json()], [mia.pk])
+
+    def test_recepcion_y_admin_siguen_viendo_todas_las_ordenes(self):
+        self.orden_asignada(self.operario)
+        self.orden_asignada(self.otro_operario)
+        admin = User.objects.create_user(username="jefe", password="x", rol=User.Rol.ADMINISTRADOR)
+
+        for usuario in (self.recepcionista, admin):
+            with self.subTest(usuario=usuario.username):
+                self.client.force_authenticate(usuario)
+                ordenes = self.client.get("/api/ordenes").json()
+                self.assertEqual(len(ordenes), 2)
+                self.assertEqual(
+                    self.client.get(f"/api/ordenes/{ordenes[0]['id']}").status_code, 200
+                )
+
+    def test_la_bandeja_es_solo_para_operarios(self):
+        admin = User.objects.create_user(username="jefe", password="x", rol=User.Rol.ADMINISTRADOR)
+
+        self.assertEqual(self.bandeja(self.recepcionista).status_code, 403)
+        self.assertEqual(self.bandeja(admin).status_code, 403)
+        self.client.force_authenticate(None)
+        self.assertIn(self.client.get("/api/ordenes/bandeja").status_code, (401, 403))
+
+    def test_la_bandeja_no_admite_escritura(self):
+        self.client.force_authenticate(self.operario)
+
+        self.assertEqual(self.client.post("/api/ordenes/bandeja", {}).status_code, 405)
+
+    def test_las_consultas_no_crecen_con_el_numero_de_ordenes(self):
+        self.orden_asignada(self.operario)
+        with self.assertNumQueries(6):
+            self.bandeja()
+
+        for _ in range(3):
+            self.orden_asignada(self.operario)
+        with self.assertNumQueries(6):
+            self.assertEqual(len(self.bandeja().json()), 4)

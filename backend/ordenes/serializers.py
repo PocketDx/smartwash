@@ -360,3 +360,35 @@ class EntregaSerializer(serializers.Serializer):
             return f"{detalle}. Discrepancias: " + "; ".join(discrepancias)
         return f"{detalle}, todas coinciden con lo solicitado"
 
+
+
+class PrendaBandejaSerializer(serializers.ModelSerializer):
+    tipo_prenda_nombre = serializers.CharField(source="tipo_prenda.nombre", read_only=True)
+    servicios = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Prenda
+        fields = (
+            "id",
+            "tipo_prenda_nombre",
+            "cantidad",
+            "peso",
+            "talla",
+            "genero",
+            "color",
+            "estado_inicial",
+            "servicios",
+        )
+
+    def get_servicios(self, prenda) -> list[str]:
+        return [linea.tarifa.servicio.nombre for linea in prenda.servicios.all()]
+
+
+class OrdenBandejaSerializer(serializers.ModelSerializer):
+    # Sin cliente ni valores: el operario solo necesita saber que procesar y para cuando.
+    prendas = PrendaBandejaSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = Orden
+        fields = ("id", "codigo", "estado", "fecha_estimada_entrega", "prendas")
+        read_only_fields = fields
