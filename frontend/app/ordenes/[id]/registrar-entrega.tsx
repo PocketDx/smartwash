@@ -5,6 +5,7 @@ import { useState, type FormEvent } from "react";
 
 import { AlertaErrores } from "@/app/catalogo/errores";
 import { registrarEntrega, type Orden } from "@/lib/api";
+import { formatCOP } from "@/lib/format";
 import { ClayButton, ClayCard, ClayTextarea } from "../../components/ui/clay";
 import { mensajesDeOrden } from "../errores";
 
@@ -61,10 +62,28 @@ export default function RegistrarEntrega({ orden }: { orden: Orden }) {
     return (
       <ClayCard className="mb-6">
         <h2 className="text-sm font-bold text-(--sw-ink)">Entrega</h2>
-        <p className="mt-1 text-sm text-(--sw-ink-soft)">
-          La orden esta lista. Verifica cada prenda contra lo solicitado antes de entregarla.
-        </p>
-        <ClayButton type="button" className="mt-3" onClick={() => setAbierto(true)}>
+        {orden.pago_completo ? (
+          <p className="mt-1 text-sm text-(--sw-ink-soft)">
+            La orden esta lista. Verifica cada prenda contra lo solicitado antes de entregarla.
+          </p>
+        ) : (
+          <div role="status" className="clay-sm mt-3 border-l-8 border-l-(--sw-coral) p-4 text-sm">
+            <p className="font-semibold text-(--sw-ink)">
+              No se puede entregar: saldo pendiente de {formatCOP(orden.saldo_pendiente)}
+            </p>
+            <p className="mt-1 text-(--sw-ink-soft)">
+              El pago debe estar completo antes de entregar, incluidas las prendas o servicios agregados
+              despues del abono. Pagado {formatCOP(orden.total_pagado)} de {formatCOP(orden.valor_total)}.
+            </p>
+          </div>
+        )}
+        {/* El backend aplica la misma regla: esto solo evita un intento que va a fallar. */}
+        <ClayButton
+          type="button"
+          className="mt-3"
+          onClick={() => setAbierto(true)}
+          disabled={!orden.pago_completo}
+        >
           Registrar entrega
         </ClayButton>
       </ClayCard>
