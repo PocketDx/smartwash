@@ -6,6 +6,7 @@ import type { ReactNode } from "react";
 import {
   getCurrentUser,
   getOrden,
+  getPagosOrden,
   getServicios,
   getTarifas,
   getTiposPrenda,
@@ -18,6 +19,7 @@ import { COLOR_ESTADO } from "../tabla-ordenes";
 import AgregarPrenda from "./agregar-prenda";
 import AgregarServicio from "./agregar-servicio";
 import CambiarEstado from "./cambiar-estado";
+import PagosOrden from "./pagos-orden";
 
 const ESTADOS_QUE_ADMITEN_LINEAS: EstadoOrden[] = ["En espera", "Recibida", "Clasificada"];
 
@@ -45,11 +47,12 @@ export default async function OrdenPage({
   const { registrada } = await searchParams;
   const puedeEditar = user.rol !== "operario";
 
-  const [orden, tiposPrenda, servicios, tarifas] = await Promise.all([
+  const [orden, tiposPrenda, servicios, tarifas, pagos] = await Promise.all([
     getOrden(id, cookieStore),
     puedeEditar ? getTiposPrenda(cookieStore) : null,
     puedeEditar ? getServicios(cookieStore) : null,
     puedeEditar ? getTarifas(cookieStore, true) : null,
+    puedeEditar ? getPagosOrden(id, cookieStore) : null,
   ]);
 
   if (orden === null) {
@@ -131,6 +134,8 @@ export default async function OrdenPage({
           </p>
         )}
       </ClayCard>
+
+      {puedeEditar && <PagosOrden orden={orden} pagos={pagos} />}
 
       <h2 className="mb-3 text-lg font-bold text-(--sw-ink)">Prendas</h2>
       <div className="flex flex-col gap-3">

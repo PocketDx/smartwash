@@ -473,6 +473,27 @@ export async function cambiarEstadoOrden(id: number, estado: EstadoOrden): Promi
   return api(`/ordenes/${id}/estado`, { method: "POST", body: { estado } });
 }
 
+/* ------------------------------- Pagos de una orden (HU21) ------------------------------- */
+
+export type MetodoPago = "efectivo" | "transferencia" | "tarjeta";
+
+/** Los pagos no se editan ni se eliminan: solo se registran y se listan. */
+export type Pago = {
+  id: number;
+  monto: string;
+  metodo: MetodoPago;
+  creado_en: string;
+  creado_por: number | null;
+};
+
+export async function getPagosOrden(id: number, cookieStore: CookieStore): Promise<Pago[] | null> {
+  return fetchBackend<Pago[]>(`/ordenes/${id}/pagos`, cookieStore);
+}
+
+export async function registrarPago(id: number, monto: string, metodo: MetodoPago): Promise<Response> {
+  return api(`/ordenes/${id}/pagos`, { method: "POST", body: { monto, metodo } });
+}
+
 /* ------------------------- Rastreo publico de pedidos (sin cuenta de cliente) ------------------------- *
  * Orden.codigo se diseno para esto: "codigo de rastreo... publico" (ver
  * backend/ordenes/models.py). No hay rol "cliente" en accounts.User, asi que
