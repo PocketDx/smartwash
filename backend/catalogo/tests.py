@@ -6,7 +6,7 @@ from django.db import IntegrityError
 from django.test import TestCase
 from rest_framework.test import APITestCase
 
-from .models import Servicio, TipoPrenda, Tarifa
+from .models import Material, Servicio, Tarifa, TipoPrenda
 
 User = get_user_model()
 
@@ -102,10 +102,41 @@ class CatalogoApiTests(APITestCase):
 
     def test_crea_un_tipo_de_prenda(self):
         response = self.client.post(
-            "/api/catalogo/tipos-prenda", {"nombre": "Cobija", "material": "Lana"}
+            "/api/catalogo/tipos-prenda", {"nombre": "Cobija"}
         )
         self.assertEqual(response.status_code, 201)
-        self.assertTrue(TipoPrenda.objects.filter(nombre="Cobija").exists())
+        self.assertEqual(response.json(), {"id": TipoPrenda.objects.get(nombre="Cobija").pk, "nombre": "Cobija"})
+
+    def test_crea_y_edita_un_material_con_autoria(self):
+        creado = self.client.post("/api/catalogo/materiales", {"nombre": "Lana"})
+        self.assertEqual(creado.status_code, 201)
+        material = Material.objects.get()
+        self.assertEqual(material.creado_por, self.admin)
+
+        editado = self.client.patch(
+            f"/api/catalogo/materiales/{material.pk}", {"nombre": "Seda"}, content_type="application/json"
+        )
+        self.assertEqual(editado.status_code, 200)
+        material.refresh_from_db()
+        self.assertEqual(material.nombre, "Seda")
+
+    def test_rechaza_un_material_repetido_sin_importar_mayusculas(self):
+        Material.objects.create(nombre="Algodon")
+        response = self.client.post("/api/catalogo/materiales", {"nombre": " algodon "})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(Material.objects.count(), 1)
+
+    def test_cualquier_sesion_lista_materiales_y_solo_el_administrador_escribe(self):
+        Material.objects.create(nombre="Jean")
+        for rol in (User.Rol.RECEPCIONISTA, User.Rol.OPERARIO):
+            usuario = User.objects.create_user(username=f"u-{rol}", password="x", rol=rol)
+            self.client.force_authenticate(usuario)
+            self.assertEqual(self.client.get("/api/catalogo/materiales").status_code, 200)
+            self.assertEqual(self.client.post("/api/catalogo/materiales", {"nombre": "Lino"}).status_code, 403)
+            self.assertEqual(
+                self.client.post("/api/catalogo/tipos-prenda", {"nombre": "Saco"}).status_code, 403
+            )
+        self.assertEqual(Material.objects.count(), 1)
 
     def test_crea_una_tarifa_para_un_par_prenda_servicio(self):
         response = self.client.post("/api/catalogo/tarifas", self.datos_tarifa())

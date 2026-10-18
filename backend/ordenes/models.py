@@ -8,7 +8,7 @@ from django.db.models import Sum
 from django.utils import timezone
 from django.utils.crypto import get_random_string
 
-from catalogo.models import Tarifa, TipoPrenda
+from catalogo.models import Material, Tarifa, TipoPrenda
 from clientes.models import Cliente
 from core.models import ModeloConAutoria
 from fidelizacion.models import ReglaDescuento
@@ -234,6 +234,11 @@ class Prenda(ModeloConAutoria):
     tipo_prenda = models.ForeignKey(
         TipoPrenda, on_delete=models.PROTECT, related_name="prendas"
     )
+    # Nulo en la base solo por las prendas guardadas antes de existir el
+    # material; la API lo exige en toda prenda nueva.
+    material = models.ForeignKey(
+        Material, on_delete=models.PROTECT, null=True, blank=True, related_name="prendas"
+    )
     cantidad = models.PositiveIntegerField(default=1)
     peso = models.DecimalField(
         max_digits=7,
@@ -260,7 +265,8 @@ class Prenda(ModeloConAutoria):
         ]
 
     def __str__(self):
-        return f"{self.cantidad} x {self.tipo_prenda}"
+        nombre = f"{self.tipo_prenda} · {self.material}" if self.material_id else str(self.tipo_prenda)
+        return f"{self.cantidad} x {nombre}"
 
 
 class OrdenServicio(ModeloConAutoria):

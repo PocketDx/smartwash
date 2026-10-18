@@ -39,7 +39,7 @@ Evento = HistorialOrden.TipoEvento
 
 def ordenes_con_detalle():
     return Orden.objects.select_related("cliente").prefetch_related(
-        "prendas__tipo_prenda", "prendas__servicios__tarifa__servicio"
+        "prendas__tipo_prenda", "prendas__material", "prendas__servicios__tarifa__servicio"
     )
 
 
@@ -76,7 +76,7 @@ class BandejaOperarioView(generics.ListAPIView):
         return (
             Orden.objects.filter(operario=self.request.user)
             .exclude(estado__in=self.ESTADOS_FUERA_DE_BANDEJA)
-            .prefetch_related("prendas__tipo_prenda", "prendas__servicios__tarifa__servicio")
+            .prefetch_related("prendas__tipo_prenda", "prendas__material", "prendas__servicios__tarifa__servicio")
             .order_by("fecha_estimada_entrega", "creado_en")
         )
 

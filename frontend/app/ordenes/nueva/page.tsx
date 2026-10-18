@@ -2,7 +2,7 @@ import { cookies } from "next/headers";
 import Link from "next/link";
 import { redirect } from "next/navigation";
 
-import { getClientes, getCurrentUser, getServicios, getTarifas, getTiposPrenda } from "@/lib/api";
+import { getClientes, getCurrentUser, getMateriales, getServicios, getTarifas, getTiposPrenda } from "@/lib/api";
 import { ClayCard, Encabezado } from "../../components/ui/clay";
 import { tarifasDeHoy } from "../cotizacion";
 import OrdenForm from "./orden-form";
@@ -13,9 +13,10 @@ export default async function NuevaOrdenPage() {
   if (!user) redirect("/login");
   if (user.rol === "operario") redirect("/ordenes");
 
-  const [clientes, tiposPrenda, servicios, tarifas] = await Promise.all([
+  const [clientes, tiposPrenda, materiales, servicios, tarifas] = await Promise.all([
     getClientes(cookieStore),
     getTiposPrenda(cookieStore),
+    getMateriales(cookieStore),
     getServicios(cookieStore),
     getTarifas(cookieStore, true),
   ]);
@@ -29,7 +30,7 @@ export default async function NuevaOrdenPage() {
         Registra las prendas que entrega el cliente y los servicios que pide.
       </Encabezado>
 
-      {clientes === null || tiposPrenda === null || servicios === null || tarifas === null ? (
+      {clientes === null || tiposPrenda === null || materiales === null || servicios === null || tarifas === null ? (
         <ClayCard>
           <p className="text-sm text-(--sw-ink-soft)">
             No se pudieron cargar los clientes o el catalogo. Verifica que el backend este en ejecucion.
@@ -49,6 +50,7 @@ export default async function NuevaOrdenPage() {
         <OrdenForm
           clientes={clientes}
           tiposPrenda={tiposPrenda}
+          materiales={materiales}
           servicios={servicios}
           tarifas={tarifasDeHoy(tarifas)}
         />

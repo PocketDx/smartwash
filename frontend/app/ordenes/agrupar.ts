@@ -1,5 +1,6 @@
 type Agrupable = {
   tipo_prenda_nombre: string;
+  material_nombre: string | null;
   cantidad: number;
   peso: string | null;
   talla: string;
@@ -19,6 +20,7 @@ export function agruparPrendas<T extends Agrupable>(
   for (const p of prendas) {
     const clave = JSON.stringify([
       p.tipo_prenda_nombre,
+      p.material_nombre,
       p.talla,
       p.genero,
       p.color,
@@ -37,7 +39,7 @@ export function agruparPrendas<T extends Agrupable>(
 export function detallesDe<T extends Agrupable>(grupo: GrupoDePrendas<T>): string[] {
   const [p] = grupo.prendas;
   const porUnidad = grupo.prendas.length > 1 ? " c/u" : "";
-  return [p.peso && `${Number(p.peso)} kg${porUnidad}`, p.talla && `talla ${p.talla}`, p.genero, p.color].filter(
+  return [p.material_nombre, p.peso && `${Number(p.peso)} kg${porUnidad}`, p.talla && `talla ${p.talla}`, p.genero, p.color].filter(
     (d): d is string => Boolean(d),
   );
 }

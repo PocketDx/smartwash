@@ -5,6 +5,7 @@ import type { ReactNode } from "react";
 
 import {
   getCurrentUser,
+  getMateriales,
   getOperarios,
   getOrden,
   getPagosOrden,
@@ -52,9 +53,10 @@ export default async function OrdenPage({
   const { registrada } = await searchParams;
   const puedeEditar = user.rol !== "operario";
 
-  const [orden, tiposPrenda, servicios, tarifas, pagos, operarios] = await Promise.all([
+  const [orden, tiposPrenda, materiales, servicios, tarifas, pagos, operarios] = await Promise.all([
     getOrden(id, cookieStore),
     puedeEditar ? getTiposPrenda(cookieStore) : null,
+    puedeEditar ? getMateriales(cookieStore) : null,
     puedeEditar ? getServicios(cookieStore) : null,
     puedeEditar ? getTarifas(cookieStore, true) : null,
     puedeEditar ? getPagosOrden(id, cookieStore) : null,
@@ -78,7 +80,7 @@ export default async function OrdenPage({
 
   const tarifasVigentes = tarifas ? tarifasDeHoy(tarifas) : [];
   const admiteLineas = puedeEditar && ESTADOS_QUE_ADMITEN_LINEAS.includes(orden.estado);
-  const conCatalogo = admiteLineas && tiposPrenda !== null && servicios !== null;
+  const conCatalogo = admiteLineas && tiposPrenda !== null && materiales !== null && servicios !== null;
 
   return (
     <main className="mx-auto max-w-4xl px-4 py-8 sm:px-8 sm:py-12">
@@ -201,11 +203,12 @@ export default async function OrdenPage({
         })}
       </div>
 
-      {conCatalogo && tiposPrenda && servicios && (
+      {conCatalogo && tiposPrenda && materiales && servicios && (
         <div className="mt-4">
           <AgregarPrenda
             ordenId={orden.id}
             tiposPrenda={tiposPrenda}
+            materiales={materiales}
             servicios={servicios}
             tarifas={tarifasVigentes}
           />
