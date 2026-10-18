@@ -83,11 +83,16 @@ export default async function OrdenPage({
         eyebrow="Orden"
         titulo={orden.codigo}
         acciones={
-          <div className="flex flex-wrap gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <ClayBadge color={COLOR_ESTADO[orden.estado]}>{orden.estado}</ClayBadge>
             <ClayBadge color={orden.estado_pago === "Pagada" ? "mint" : "peach"}>
               Pago {orden.estado_pago.toLowerCase()}
             </ClayBadge>
+            {puedeEditar && (
+              <Link href={`/ordenes/${orden.id}/historial`} className="text-xs font-bold text-(--sw-ink-soft) hover:underline">
+                Ver historial
+              </Link>
+            )}
           </div>
         }
       >
