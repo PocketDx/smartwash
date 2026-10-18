@@ -11,7 +11,7 @@ from django.test import TestCase, TransactionTestCase, override_settings
 from rest_framework.exceptions import ValidationError
 from rest_framework.test import APITestCase
 
-from catalogo.models import Servicio, TipoPrenda, Tarifa
+from catalogo.models import Material, Servicio, Tarifa, TipoPrenda
 from clientes.models import Cliente
 from fidelizacion.models import ReglaDescuento
 
@@ -368,6 +368,8 @@ class CatalogoDePruebaMixin:
         )
         self.camisa = TipoPrenda.objects.create(nombre="Camisa")
         self.pantalon = TipoPrenda.objects.create(nombre="Pantalon")
+        self.algodon = Material.objects.create(nombre="Algodon")
+        self.jean = Material.objects.create(nombre="Jean")
         self.lavado = Servicio.objects.create(nombre="Lavado")
         self.planchado = Servicio.objects.create(nombre="Planchado")
         self.tarifa(self.camisa, self.lavado, "4000", Tarifa.UnidadCobro.KILO)
@@ -387,6 +389,7 @@ class CatalogoDePruebaMixin:
     def prenda(self, *servicios, tipo=None, **extra):
         datos = {
             "tipo_prenda": (tipo or self.camisa).pk,
+            "material": self.algodon.pk,
             "cantidad": 3,
             "peso": "2.5",
             "servicios": [s.pk for s in servicios],
@@ -1438,10 +1441,127 @@ class BandejaOperarioApiTests(CatalogoDePruebaMixin, APITestCase):
 
     def test_las_consultas_no_crecen_con_el_numero_de_ordenes(self):
         self.orden_asignada(self.operario)
-        with self.assertNumQueries(6):
+        with self.assertNumQueries(7):
             self.bandeja()
 
         for _ in range(3):
             self.orden_asignada(self.operario)
-        with self.assertNumQueries(6):
+        with self.assertNumQueries(7):
             self.assertEqual(len(self.bandeja().json()), 4)
+
+
+class MaterialYServiciosPorPrendaTests(CatalogoDePruebaMixin, APITestCase):
+    def setUp(self):
+        self.crear_catalogo()
+        self.tinte = Servicio.objects.create(nombre="Tintura")
+        self.tarifa(self.camisa, self.tinte, "1500", Tarifa.UnidadCobro.PRENDA)
+        self.client.force_authenticate(self.recepcionista)
+
+    def test_la_orden_exige_material_en_cada_prenda(self):
+        sin_material = self.prenda(self.planchado)
+        del sin_material["material"]
+
+        response = self.registrar(sin_material)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("material", str(response.json()))
+        self.assertFalse(Orden.objects.exists())
+
+    def test_agregar_prenda_tambien_exige_material(self):
+        orden = self.registrar(self.prenda(self.planchado)).json()
+        sin_material = self.prenda(self.planchado)
+        del sin_material["material"]
+
+        response = self.client.post(f"/api/ordenes/{orden['id']}/prendas", sin_material, format="json")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("material", response.json())
+
+    def test_rechaza_un_material_inexistente(self):
+        response = self.registrar(self.prenda(self.planchado, material=9999))
+
+        self.assertEqual(response.status_code, 400)
+
+    def test_el_material_se_guarda_y_se_muestra_en_orden_bandeja_y_entrega(self):
+        datos = self.registrar(self.prenda(self.planchado, material=self.jean.pk)).json()
+
+        prenda = datos["detalle_prendas"][0]
+        self.assertEqual((prenda["material"], prenda["material_nombre"]), (self.jean.pk, "Jean"))
+        self.assertEqual(Prenda.objects.get().material, self.jean)
+
+        operario = User.objects.create_user(username="op", password="x", rol=User.Rol.OPERARIO)
+        Orden.objects.filter(pk=datos["id"]).update(operario=operario, estado=Orden.Estado.RECIBIDA)
+        self.client.force_authenticate(operario)
+        bandeja = self.client.get("/api/ordenes/bandeja").json()
+        self.assertEqual(bandeja[0]["prendas"][0]["material_nombre"], "Jean")
+
+    def test_una_prenda_anterior_sin_material_se_serializa_sin_material(self):
+        datos = self.registrar(self.prenda(self.planchado)).json()
+        Prenda.objects.update(material=None)
+
+        prenda = self.client.get(f"/api/ordenes/{datos['id']}").json()["detalle_prendas"][0]
+
+        self.assertIsNone(prenda["material"])
+        self.assertIsNone(prenda["material_nombre"])
+
+    def ejemplo_de_tres_camisas_y_dos_pantalones(self):
+        self.tarifa(self.pantalon, self.planchado, "2500", Tarifa.UnidadCobro.PRENDA)
+        self.tarifa(self.pantalon, self.lavado, "3000", Tarifa.UnidadCobro.KILO)
+        self.tarifa(self.pantalon, self.tinte, "1000", Tarifa.UnidadCobro.PRENDA)
+        return self.registrar(
+            self.prenda(self.lavado, cantidad=1, peso="2"),
+            self.prenda(self.lavado, self.planchado, cantidad=1, peso="1", material=self.jean.pk),
+            self.prenda(self.tinte, cantidad=1, peso=None),
+            self.prenda(self.planchado, tipo=self.pantalon, cantidad=1, peso=None),
+            self.prenda(
+                self.planchado, self.lavado, self.tinte, tipo=self.pantalon, cantidad=1, peso="1.5"
+            ),
+        )
+
+    def test_servicios_distintos_por_prenda_suman_el_subtotal_y_congelan_cada_valor(self):
+        response = self.ejemplo_de_tres_camisas_y_dos_pantalones()
+
+        self.assertEqual(response.status_code, 201, response.json())
+        self.assertEqual(Decimal(response.json()["subtotal"]), Decimal("26000"))
+        lineas = [
+            [(s["servicio_nombre"], Decimal(s["valor_aplicado"])) for s in p["servicios"]]
+            for p in response.json()["detalle_prendas"]
+        ]
+        self.assertEqual(
+            lineas,
+            [
+                [("Lavado", Decimal("8000"))],
+                [("Lavado", Decimal("4000")), ("Planchado", Decimal("2000"))],
+                [("Tintura", Decimal("1500"))],
+                [("Planchado", Decimal("2500"))],
+                [
+                    ("Planchado", Decimal("2500")),
+                    ("Lavado", Decimal("4500")),
+                    ("Tintura", Decimal("1000")),
+                ],
+            ],
+        )
+        self.assertEqual(OrdenServicio.objects.count(), 8)
+
+    def test_el_valor_cobrado_no_cambia_si_la_tarifa_sube_despues(self):
+        datos = self.ejemplo_de_tres_camisas_y_dos_pantalones().json()
+        Tarifa.objects.update(valor=Decimal("99999"))
+
+        orden = self.client.get(f"/api/ordenes/{datos['id']}").json()
+
+        self.assertEqual(Decimal(orden["detalle_prendas"][0]["servicios"][0]["valor_aplicado"]), Decimal("8000"))
+        self.assertEqual(Decimal(orden["subtotal"]), Decimal("26000"))
+
+    def test_el_descuento_se_aplica_sobre_el_total_de_las_prendas(self):
+        ReglaDescuento.objects.create(
+            nombre="Diez",
+            tipo=ReglaDescuento.Tipo.PORCENTAJE,
+            valor=Decimal("10"),
+            vigente_desde=date(2020, 1, 1),
+        )
+
+        datos = self.ejemplo_de_tres_camisas_y_dos_pantalones().json()
+
+        self.assertEqual(Decimal(datos["subtotal"]), Decimal("26000"))
+        self.assertEqual(Decimal(datos["descuento"]), Decimal("2600"))
+        self.assertEqual(Decimal(datos["valor_total"]), Decimal("23400"))

@@ -8,7 +8,7 @@ import { cx } from "@/lib/cx";
 import { ClayButton, ClayField, ClayInput } from "../components/ui/clay";
 import { AlertaErrores, mensajesDeError } from "./errores";
 
-const ETIQUETAS = { nombre: "Nombre", material: "Material" };
+const ETIQUETAS = { nombre: "Nombre" };
 
 export default function TipoPrendaForm({
   tipoPrenda,
@@ -37,7 +37,6 @@ export default function TipoPrendaForm({
     const form = new FormData(formulario);
     const datos = {
       nombre: String(form.get("nombre") ?? "").trim(),
-      material: String(form.get("material") ?? "").trim(),
     };
     const response = await (
       tipoPrenda ? actualizarTipoPrenda(tipoPrenda.id, datos) : crearTipoPrenda(datos)
@@ -68,15 +67,6 @@ export default function TipoPrendaForm({
           required
         />
       </ClayField>
-      <ClayField label="Material">
-        <ClayInput
-          name="material"
-          defaultValue={tipoPrenda?.material}
-          placeholder="Algodon, lana..."
-          maxLength={80}
-        />
-      </ClayField>
-
       <div className="flex flex-wrap items-center gap-3 sm:col-span-2">
         <ClayButton type="submit" disabled={pending}>
           {pending ? "Guardando..." : editando ? "Guardar cambios" : "Agregar tipo de prenda"}

@@ -1,12 +1,13 @@
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 
-import { getCurrentUser, getServicios, getTarifas, getTiposPrenda } from "@/lib/api";
+import { getCurrentUser, getMateriales, getServicios, getTarifas, getTiposPrenda } from "@/lib/api";
 import { ClayCard, Encabezado } from "../components/ui/clay";
 import FiltroVigencia from "./filtro-vigencia";
+import MaterialForm from "./material-form";
 import ServicioForm from "./servicio-form";
 import TablaTarifas from "./tabla-tarifas";
-import { TablaServicios, TablaTiposPrenda } from "./tabla-catalogo";
+import { TablaMateriales, TablaServicios, TablaTiposPrenda } from "./tabla-catalogo";
 import TarifaForm from "./tarifa-form";
 import TipoPrendaForm from "./tipo-prenda-form";
 
@@ -31,8 +32,9 @@ export default async function CatalogoPage({
   const puedeEditar = user.rol === "administrador";
 
   const soloVigentes = (await searchParams).vigentes === "1";
-  const [tiposPrenda, servicios, tarifas] = await Promise.all([
+  const [tiposPrenda, materiales, servicios, tarifas] = await Promise.all([
     getTiposPrenda(cookieStore),
+    getMateriales(cookieStore),
     getServicios(cookieStore),
     getTarifas(cookieStore, soloVigentes),
   ]);
@@ -41,8 +43,8 @@ export default async function CatalogoPage({
     <main className="mx-auto max-w-5xl px-4 py-8 sm:px-8 sm:py-12">
       <Encabezado eyebrow="Administracion · EP03" titulo="Catalogo">
         {puedeEditar
-          ? "Administra servicios y sus tarifas por tipo de prenda (HU07)."
-          : "Consulta los servicios y sus tarifas por tipo de prenda (HU07)."}
+          ? "Administra tipos de prenda, materiales, servicios y las tarifas por tipo de prenda y servicio (HU07)."
+          : "Consulta tipos de prenda, materiales, servicios y las tarifas por tipo de prenda y servicio (HU07)."}
       </Encabezado>
 
       {puedeEditar && (
@@ -56,6 +58,20 @@ export default async function CatalogoPage({
           <ErrorDeCarga recurso="los tipos de prenda" />
         ) : (
           <TablaTiposPrenda tiposPrenda={tiposPrenda} editable={puedeEditar} />
+        )}
+      </div>
+
+      {puedeEditar && (
+        <ClayCard className="mb-4">
+          <h2 className="sw-eyebrow">Nuevo material</h2>
+          <MaterialForm className="mt-4" />
+        </ClayCard>
+      )}
+      <div className="mb-6">
+        {materiales === null ? (
+          <ErrorDeCarga recurso="los materiales" />
+        ) : (
+          <TablaMateriales materiales={materiales} editable={puedeEditar} />
         )}
       </div>
 

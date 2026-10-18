@@ -111,6 +111,7 @@ export default function RegistrarEntrega({ orden }: { orden: Orden }) {
               <legend className="sr-only">Prenda {indice + 1}</legend>
               <p className="text-sm font-semibold text-(--sw-ink)">
                 Prenda {indice + 1}: {prenda.cantidad} × {prenda.tipo_prenda_nombre}
+                {prenda.material_nombre && ` · ${prenda.material_nombre}`}
                 <span className="font-normal text-(--sw-ink-soft)">
                   {" "}
                   · {prenda.servicios.map((s) => s.servicio_nombre).join(", ")}

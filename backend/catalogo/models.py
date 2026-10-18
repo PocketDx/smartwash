@@ -6,12 +6,23 @@ from core.models import ModeloConAutoria
 
 class TipoPrenda(ModeloConAutoria):
     nombre = models.CharField(max_length=80, unique=True)
-    material = models.CharField(max_length=80, blank=True)
 
     class Meta:
         ordering = ("nombre",)
         verbose_name = "tipo de prenda"
         verbose_name_plural = "tipos de prenda"
+
+    def __str__(self):
+        return self.nombre
+
+
+class Material(ModeloConAutoria):
+    nombre = models.CharField(max_length=80, unique=True)
+
+    class Meta:
+        ordering = ("nombre",)
+        verbose_name = "material"
+        verbose_name_plural = "materiales"
 
     def __str__(self):
         return self.nombre

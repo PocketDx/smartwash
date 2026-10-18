@@ -71,15 +71,17 @@ nucleo (T2); el resto de tablas del modelo entra con su historia.
 | Modelo | App | Notas |
 |--------|-----|-------|
 | `Cliente` | clientes | `documento` unico. `clasificacion` la actualiza RF38 |
-| `TipoPrenda` | catalogo | Camisa, pantalon, cobija. La tarifa depende de esto |
+| `TipoPrenda` | catalogo | Solo el nombre: camisa, pantalon, cobija. La tarifa depende de esto, no del material |
+| `Material` | catalogo | Solo el nombre: algodon, jean, lana. Lista independiente del tipo |
 | `Servicio` | catalogo | Lavado, planchado, lavado en seco |
 | `Tarifa` | catalogo | Por `(tipo_prenda, servicio)`, con vigencia. Una sola vigente por par |
 | `Orden` | ordenes | `codigo` unico y publico. `operario` es nulo hasta HU10 |
-| `Prenda` | ordenes | Pertenece a una orden y tiene un `TipoPrenda` |
+| `Prenda` | ordenes | Pertenece a una orden; tiene un `TipoPrenda` y un `Material` (obligatorio en la API, nulo en la base por las prendas anteriores) |
 | `OrdenServicio` | ordenes | Que servicios recibe cada prenda, con `valor_aplicado` congelado |
 | `Pago` | pagos | Inmutable. `Orden.total_pagado()`, `tiene_abono()` y `pago_completo()` son la unica fuente del estado financiero |
 
-Una prenda puede recibir **varios servicios**: una camisa va a lavado y a
+Cada prenda lleva su propia lista de servicios (la API acepta una distinta por
+prenda). Una prenda puede recibir **varios servicios**: una camisa va a lavado y a
 planchado. Por eso existe `OrdenServicio` y no un FK directo.
 
 Todo modelo de dominio hereda de `core.models.ModeloConAutoria`, que agrega

@@ -312,7 +312,7 @@ Segun vayan entrando las historias tendra sentido agregar, por ejemplo:
 
 | Comando | Que sembraria |
 |---------|---------------|
-| `seed_catalogo` | Tipos de prenda y servicios con sus tarifas |
+| `seed_catalogo` | Tipos de prenda, materiales y servicios con sus tarifas |
 | `seed_clientes` | Unos cuantos clientes para no inventarlos a mano |
 | `seed_ordenes` | Ordenes de ejemplo en distintos estados, para probar el flujo |
 

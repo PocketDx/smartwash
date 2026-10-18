@@ -5,22 +5,23 @@ export const TALLAS = ["XXS", "XS", "S", "M", "L", "XL", "XXL", "3XL", "4XL", "�
 
 /** Datos propios de una unidad; los numericos son texto del input. */
 export type DatosPrenda = {
+  material: string;
   peso: string;
   talla: string;
   genero: string;
   color: string;
   estado_inicial: string;
+  servicios: number[];
 };
 
 export type UnidadEditable = DatosPrenda & { clave: number };
 
-/** Un bloque: un tipo de prenda con su cantidad y servicios. Sin detallar, sus
- * datos valen para todas las unidades; detallado, cada unidad lleva los suyos. */
+/** Un bloque: un tipo de prenda con su cantidad. Sin detallar, sus datos y
+ * servicios valen para todas las unidades; detallado, cada unidad lleva los suyos. */
 export type LineaEditable = DatosPrenda & {
   clave: number;
   tipo_prenda: string;
   cantidad: string;
-  servicios: number[];
   detallar: boolean;
   unidades: UnidadEditable[];
 };
@@ -33,6 +34,7 @@ export function lineaVacia(): LineaEditable {
     clave: siguienteClave,
     tipo_prenda: "",
     cantidad: "1",
+    material: "",
     peso: "",
     talla: "",
     genero: "",
@@ -44,8 +46,16 @@ export function lineaVacia(): LineaEditable {
   };
 }
 
-export function datosDe({ peso, talla, genero, color, estado_inicial }: DatosPrenda): DatosPrenda {
-  return { peso, talla, genero, color, estado_inicial };
+export function datosDe(d: DatosPrenda): DatosPrenda {
+  return {
+    material: d.material,
+    peso: d.peso,
+    talla: d.talla,
+    genero: d.genero,
+    color: d.color,
+    estado_inicial: d.estado_inicial,
+    servicios: [...d.servicios],
+  };
 }
 
 export function unidadNueva(datos: DatosPrenda): UnidadEditable {
@@ -66,9 +76,12 @@ export function ajustarUnidades(linea: LineaEditable): UnidadEditable[] {
   return base;
 }
 
+function huella(d: DatosPrenda): string {
+  return JSON.stringify({ ...datosDe(d), servicios: [...d.servicios].sort((a, b) => a - b) });
+}
+
 export function difierenDelBloque(linea: LineaEditable): boolean {
-  const bloque = datosDe(linea);
-  return linea.unidades.some((u) => (Object.keys(bloque) as (keyof DatosPrenda)[]).some((k) => u[k] !== bloque[k]));
+  return linea.unidades.some((u) => huella(u) !== huella(linea));
 }
 
 // ?vigentes=1 solo descarta las tarifas cerradas; el backend cotiza ademas con
@@ -84,41 +97,42 @@ export function tarifaDe(tarifas: Tarifa[], tipoPrenda: number, servicio: number
   return tarifas.find((t) => t.tipo_prenda === tipoPrenda && t.servicio === servicio);
 }
 
-export function cobraPorKilo(linea: LineaEditable, tarifas: Tarifa[]): boolean {
-  const tipo = Number(linea.tipo_prenda);
-  return linea.servicios.some((s) => tarifaDe(tarifas, tipo, s)?.unidad_cobro === "kilo");
-}
-
-/** Subtotal del bloque antes de descuentos. Es una vista previa: el valor que
- * cuenta lo calcula y congela el backend al registrar. */
-export function subtotalEstimado(linea: LineaEditable, tarifas: Tarifa[]): number {
-  const tipo = Number(linea.tipo_prenda);
-  const unidades = unidadesDeCantidad(linea);
-  const pesoTotal = linea.detallar
-    ? linea.unidades.reduce((suma, u) => suma + (Number(u.peso) || 0), 0)
-    : (Number(linea.peso) || 0) * unidades;
-  return linea.servicios.reduce((total, servicio) => {
-    const tarifa = tarifaDe(tarifas, tipo, servicio);
-    if (!tarifa) return total;
-    return total + Number(tarifa.valor) * (tarifa.unidad_cobro === "kilo" ? pesoTotal : unidades);
-  }, 0);
+export function cobraPorKilo(tipoPrenda: string, servicios: number[], tarifas: Tarifa[]): boolean {
+  const tipo = Number(tipoPrenda);
+  return servicios.some((s) => tarifaDe(tarifas, tipo, s)?.unidad_cobro === "kilo");
 }
 
 function datosPorUnidad(linea: LineaEditable): DatosPrenda[] {
   return linea.detallar ? ajustarUnidades(linea) : Array.from({ length: unidadesDeCantidad(linea) }, () => linea);
 }
 
+function subtotalDeUnidad(tipoPrenda: string, datos: DatosPrenda, tarifas: Tarifa[]): number {
+  const tipo = Number(tipoPrenda);
+  return datos.servicios.reduce((total, servicio) => {
+    const tarifa = tarifaDe(tarifas, tipo, servicio);
+    if (!tarifa) return total;
+    return total + Number(tarifa.valor) * (tarifa.unidad_cobro === "kilo" ? Number(datos.peso) || 0 : 1);
+  }, 0);
+}
+
+/** Subtotal del bloque antes de descuentos: la suma de cada prenda segun sus
+ * servicios. Es una vista previa; el valor que cuenta lo congela el backend. */
+export function subtotalEstimado(linea: LineaEditable, tarifas: Tarifa[]): number {
+  return datosPorUnidad(linea).reduce((suma, d) => suma + subtotalDeUnidad(linea.tipo_prenda, d, tarifas), 0);
+}
+
 /** Una prenda de cantidad 1 por unidad del bloque. */
 export function aFormularios(linea: LineaEditable): PrendaFormulario[] {
   return datosPorUnidad(linea).map((d) => ({
     tipo_prenda: Number(linea.tipo_prenda),
+    material: Number(d.material),
     cantidad: 1,
     peso: d.peso.trim() === "" ? null : d.peso,
     talla: d.talla,
     genero: d.genero,
     color: d.color.trim(),
     estado_inicial: d.estado_inicial.trim(),
-    servicios: linea.servicios,
+    servicios: d.servicios,
   }));
 }
 
@@ -127,5 +141,18 @@ export function nombresDeUnidades(lineas: LineaEditable[], tipos: TipoPrenda[]):
   return lineas.flatMap((linea) => {
     const nombre = tipos.find((t) => t.id === Number(linea.tipo_prenda))?.nombre ?? "Prenda";
     return Array.from({ length: unidadesDeCantidad(linea) }, (_, i) => `${nombre} ${i + 1}`);
+  });
+}
+
+/** Cada prenda necesita al menos un servicio; se avisa antes de llamar a la API. */
+export function erroresDeServicios(lineas: LineaEditable[], tipos: TipoPrenda[]): string[] {
+  return lineas.flatMap((linea, indice) => {
+    const nombre = tipos.find((t) => t.id === Number(linea.tipo_prenda))?.nombre ?? `Prenda ${indice + 1}`;
+    if (!linea.detallar) {
+      return linea.servicios.length === 0 ? [`${nombre} · Servicios: elige al menos uno.`] : [];
+    }
+    return ajustarUnidades(linea).flatMap((u, i) =>
+      u.servicios.length === 0 ? [`${nombre} ${i + 1} · Servicios: elige al menos uno.`] : [],
+    );
   });
 }

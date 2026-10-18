@@ -2,8 +2,13 @@ from rest_framework import generics
 
 from core.permissions import SoloAdministradorEscribe
 
-from .models import Servicio, TipoPrenda, Tarifa
-from .serializers import ServicioSerializer, TarifaSerializer, TipoPrendaSerializer
+from .models import Material, Servicio, Tarifa, TipoPrenda
+from .serializers import (
+    MaterialSerializer,
+    ServicioSerializer,
+    TarifaSerializer,
+    TipoPrendaSerializer,
+)
 
 
 class ServicioListCreateView(generics.ListCreateAPIView):
@@ -28,6 +33,18 @@ class TipoPrendaDetailView(generics.RetrieveUpdateAPIView):
     permission_classes = [SoloAdministradorEscribe]
     queryset = TipoPrenda.objects.all()
     serializer_class = TipoPrendaSerializer
+
+
+class MaterialListCreateView(generics.ListCreateAPIView):
+    permission_classes = [SoloAdministradorEscribe]
+    queryset = Material.objects.all()
+    serializer_class = MaterialSerializer
+
+
+class MaterialDetailView(generics.RetrieveUpdateAPIView):
+    permission_classes = [SoloAdministradorEscribe]
+    queryset = Material.objects.all()
+    serializer_class = MaterialSerializer
 
 
 class TarifaListCreateView(generics.ListCreateAPIView):

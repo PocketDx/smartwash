@@ -2,13 +2,19 @@ from django.contrib import admin
 
 from core.admin import AutoriaAdminMixin
 
-from .models import Servicio, TipoPrenda, Tarifa
+from .models import Material, Servicio, Tarifa, TipoPrenda
 
 
 @admin.register(TipoPrenda)
 class TipoPrendaAdmin(AutoriaAdminMixin):
-    list_display = ("nombre", "material")
-    search_fields = ("nombre", "material")
+    list_display = ("nombre",)
+    search_fields = ("nombre",)
+
+
+@admin.register(Material)
+class MaterialAdmin(AutoriaAdminMixin):
+    list_display = ("nombre",)
+    search_fields = ("nombre",)
 
 
 @admin.register(Servicio)
