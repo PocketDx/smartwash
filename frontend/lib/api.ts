@@ -448,6 +448,22 @@ export async function getOrden(id: number, cookieStore: CookieStore): Promise<Or
   return fetchBackend<Orden>(`/ordenes/${id}`, cookieStore);
 }
 
+/** Lo que devuelve OrdenBandejaSerializer: sin cliente ni valores, solo lo que
+ * el operario necesita para trabajar. */
+export type PrendaDeBandeja = Omit<PrendaDeOrden, "tipo_prenda" | "servicios"> & {
+  servicios: string[];
+};
+
+export type OrdenDeBandeja = Pick<Orden, "id" | "codigo" | "estado" | "fecha_estimada_entrega"> & {
+  prendas: PrendaDeBandeja[];
+};
+
+/** Ordenes asignadas al operario de la sesion que aun no se entregan (HU11).
+ * El backend filtra por operario; otro rol recibe 403. */
+export async function getBandeja(cookieStore: CookieStore): Promise<OrdenDeBandeja[] | null> {
+  return fetchBackend<OrdenDeBandeja[]>("/ordenes/bandeja", cookieStore);
+}
+
 export async function crearOrden(cliente: number, prendas: PrendaFormulario[]): Promise<Response> {
   return api("/ordenes", { method: "POST", body: { cliente, prendas } });
 }

@@ -43,6 +43,13 @@ const ACCESOS = [
     roles: ["administrador", "recepcionista", "operario"] as Rol[],
   },
   {
+    href: "/ordenes/bandeja",
+    titulo: "Mi bandeja",
+    texto: "Las ordenes que tienes asignadas y aun no se entregan.",
+    color: "mint" as const,
+    roles: ["operario"] as Rol[],
+  },
+  {
     href: "/trazabilidad",
     titulo: "Trazabilidad",
     texto: "Seguimiento a las acciones de todos los usuarios, por tipo.",
