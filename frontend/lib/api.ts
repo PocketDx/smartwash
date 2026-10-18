@@ -111,9 +111,8 @@ export async function actuarComo(username: string): Promise<User | null> {
   return response.ok ? ((await response.json()) as User) : null;
 }
 
-/* Clientes, catalogo, fidelizacion, usuarios y auditoria ya tienen endpoints en
- * Django. Ordenes, rastreo publico y PQRS todavia no: sus funciones devuelven
- * null o fallan sin romper la pantalla. */
+/* Rastreo publico y PQRS todavia no tienen endpoints en Django: sus funciones
+ * devuelven null o fallan sin romper la pantalla. */
 
 /** GET server-side generico: reenvia cookies y nunca lanza. Un backend caido
  * y un endpoint que aun no existe (404) se ven igual desde la pagina: null. */
@@ -383,19 +382,185 @@ export type EstadoOrden =
   | "Cancelada"
   | "En espera";
 
+export type ServicioDePrenda = {
+  id: number;
+  servicio: number;
+  servicio_nombre: string;
+  unidad_cobro: UnidadCobro;
+  valor_aplicado: string;
+};
+
+export type PrendaDeOrden = {
+  id: number;
+  tipo_prenda: number;
+  tipo_prenda_nombre: string;
+  cantidad: number;
+  peso: string | null;
+  talla: string;
+  genero: string;
+  color: string;
+  estado_inicial: string;
+  servicios: ServicioDePrenda[];
+};
+
+/** Lo que devuelve OrdenSerializer. Los montos llegan como texto decimal. */
 export type Orden = {
   id: number;
   codigo: string;
   cliente: number;
+  cliente_nombre: string;
+  recepcionista: number;
+  operario: number | null;
   estado: EstadoOrden;
   estado_pago: "Pendiente" | "Parcial" | "Pagada";
+  subtotal: string;
+  descuento: string;
+  valor_total: string;
+  abono_requerido: string;
+  duracion_estimada_dias: number;
   fecha_estimada_entrega: string | null;
   fecha_entrega: string | null;
-  valor_total: string;
+  creado_en: string;
+  detalle_prendas: PrendaDeOrden[];
+  total_pagado: string;
+  saldo_pendiente: string;
+  tiene_abono: boolean;
+  pago_completo: boolean;
+};
+
+/** Una linea de prenda tal como la recibe POST /ordenes y POST /ordenes/{id}/prendas. */
+export type PrendaFormulario = {
+  tipo_prenda: number;
+  cantidad: number;
+  peso: string | null;
+  talla: string;
+  genero: string;
+  color: string;
+  estado_inicial: string;
+  servicios: number[];
 };
 
 export async function getOrdenes(cookieStore: CookieStore): Promise<Orden[] | null> {
   return fetchBackend<Orden[]>("/ordenes", cookieStore);
+}
+
+export type TipoEventoOrden =
+  | "creacion"
+  | "pago"
+  | "asignacion"
+  | "reasignacion"
+  | "cambio_estado"
+  | "prenda_agregada"
+  | "servicio_agregado"
+  | "entrega";
+
+/** Lo que devuelve HistorialOrdenSerializer. `usuario` es null cuando el
+ * evento lo genero el sistema; `usuario_nombre` ya trae "Sistema" en ese caso. */
+export type EventoOrden = {
+  id: number;
+  fecha: string;
+  tipo_evento: TipoEventoOrden;
+  tipo_evento_nombre: string;
+  usuario: number | null;
+  usuario_nombre: string;
+  detalle: string;
+};
+
+/** Historial inmutable de la orden en orden cronologico (HU15). Solo lo
+ * consultan el administrador y la recepcionista; el operario recibe 403. */
+export async function getHistorialOrden(
+  id: number,
+  cookieStore: CookieStore,
+): Promise<EventoOrden[] | null> {
+  return fetchBackend<EventoOrden[]>(`/ordenes/${id}/historial`, cookieStore);
+}
+
+export async function getOrden(id: number, cookieStore: CookieStore): Promise<Orden | null> {
+  return fetchBackend<Orden>(`/ordenes/${id}`, cookieStore);
+}
+
+/** Lo que devuelve OrdenBandejaSerializer: sin cliente ni valores, solo lo que
+ * el operario necesita para trabajar. */
+export type PrendaDeBandeja = Omit<PrendaDeOrden, "tipo_prenda" | "servicios"> & {
+  servicios: string[];
+};
+
+export type OrdenDeBandeja = Pick<Orden, "id" | "codigo" | "estado" | "fecha_estimada_entrega"> & {
+  prendas: PrendaDeBandeja[];
+};
+
+/** Ordenes asignadas al operario de la sesion que aun no se entregan (HU11).
+ * El backend filtra por operario; otro rol recibe 403. */
+export async function getBandeja(cookieStore: CookieStore): Promise<OrdenDeBandeja[] | null> {
+  return fetchBackend<OrdenDeBandeja[]>("/ordenes/bandeja", cookieStore);
+}
+
+export async function crearOrden(cliente: number, prendas: PrendaFormulario[]): Promise<Response> {
+  return api("/ordenes", { method: "POST", body: { cliente, prendas } });
+}
+
+export async function agregarPrendaAOrden(id: number, prenda: PrendaFormulario): Promise<Response> {
+  return api(`/ordenes/${id}/prendas`, { method: "POST", body: prenda });
+}
+
+export async function agregarServicioAPrenda(
+  id: number,
+  prendaId: number,
+  servicio: number,
+): Promise<Response> {
+  return api(`/ordenes/${id}/prendas/${prendaId}/servicios`, {
+    method: "POST",
+    body: { servicio },
+  });
+}
+
+export type VerificacionPrenda = { prenda: number; coincide: boolean; observacion: string };
+
+/** Entrega la orden verificando cada prenda (HU12). El backend exige que este
+ * "Lista para entrega", que se verifiquen todas sus prendas una sola vez, la
+ * observacion de cada discrepancia y el pago completo (HU24). */
+export async function registrarEntrega(id: number, prendas: VerificacionPrenda[]): Promise<Response> {
+  return api(`/ordenes/${id}/entrega`, { method: "POST", body: { prendas } });
+}
+
+/** Avanza la orden por el flujo (HU14). El backend valida la transicion, el
+ * abono y que el operario sea el asignado; "Entregada" va por /entrega (HU12). */
+export async function cambiarEstadoOrden(id: number, estado: EstadoOrden): Promise<Response> {
+  return api(`/ordenes/${id}/estado`, { method: "POST", body: { estado } });
+}
+
+/** Lo que devuelve OperarioSerializer. /operarios lista solo los activos. */
+export type Operario = { id: number; username: string; nombre: string };
+
+export async function getOperarios(cookieStore: CookieStore): Promise<Operario[] | null> {
+  return fetchBackend<Operario[]>("/operarios", cookieStore);
+}
+
+/** Asigna o reasigna la orden (HU10). El backend valida el rol, el abono, que
+ * el operario este activo y que el estado de la orden lo permita. */
+export async function asignarOperario(id: number, operario: number): Promise<Response> {
+  return api(`/ordenes/${id}/asignacion`, { method: "POST", body: { operario } });
+}
+
+/* ------------------------------- Pagos de una orden (HU21) ------------------------------- */
+
+export type MetodoPago = "efectivo" | "transferencia" | "tarjeta";
+
+/** Los pagos no se editan ni se eliminan: solo se registran y se listan. */
+export type Pago = {
+  id: number;
+  monto: string;
+  metodo: MetodoPago;
+  creado_en: string;
+  creado_por: number | null;
+};
+
+export async function getPagosOrden(id: number, cookieStore: CookieStore): Promise<Pago[] | null> {
+  return fetchBackend<Pago[]>(`/ordenes/${id}/pagos`, cookieStore);
+}
+
+export async function registrarPago(id: number, monto: string, metodo: MetodoPago): Promise<Response> {
+  return api(`/ordenes/${id}/pagos`, { method: "POST", body: { monto, metodo } });
 }
 
 /* ------------------------- Rastreo publico de pedidos (sin cuenta de cliente) ------------------------- *

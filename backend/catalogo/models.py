@@ -1,4 +1,5 @@
 from django.db import models
+from django.db.models import Q
 
 from core.models import ModeloConAutoria
 
@@ -27,6 +28,16 @@ class Servicio(ModeloConAutoria):
         return self.nombre
 
 
+class TarifaQuerySet(models.QuerySet):
+    def vigente(self, tipo_prenda, servicio, fecha):
+        return self.filter(
+            Q(vigente_hasta__isnull=True) | Q(vigente_hasta__gt=fecha),
+            tipo_prenda=tipo_prenda,
+            servicio=servicio,
+            vigente_desde__lte=fecha,
+        ).first()
+
+
 class Tarifa(ModeloConAutoria):
     class UnidadCobro(models.TextChoices):
         KILO = "kilo", "Kilo"
@@ -50,6 +61,8 @@ class Tarifa(ModeloConAutoria):
     vigente_hasta = models.DateField(
         null=True, blank=True, help_text="Vacio = es la tarifa vigente."
     )
+
+    objects = TarifaQuerySet.as_manager()
 
     class Meta:
         ordering = ("tipo_prenda__nombre", "servicio__nombre", "-vigente_desde")
