@@ -444,6 +444,37 @@ export async function getOrdenes(cookieStore: CookieStore): Promise<Orden[] | nu
   return fetchBackend<Orden[]>("/ordenes", cookieStore);
 }
 
+export type TipoEventoOrden =
+  | "creacion"
+  | "pago"
+  | "asignacion"
+  | "reasignacion"
+  | "cambio_estado"
+  | "prenda_agregada"
+  | "servicio_agregado"
+  | "entrega";
+
+/** Lo que devuelve HistorialOrdenSerializer. `usuario` es null cuando el
+ * evento lo genero el sistema; `usuario_nombre` ya trae "Sistema" en ese caso. */
+export type EventoOrden = {
+  id: number;
+  fecha: string;
+  tipo_evento: TipoEventoOrden;
+  tipo_evento_nombre: string;
+  usuario: number | null;
+  usuario_nombre: string;
+  detalle: string;
+};
+
+/** Historial inmutable de la orden en orden cronologico (HU15). Solo lo
+ * consultan el administrador y la recepcionista; el operario recibe 403. */
+export async function getHistorialOrden(
+  id: number,
+  cookieStore: CookieStore,
+): Promise<EventoOrden[] | null> {
+  return fetchBackend<EventoOrden[]>(`/ordenes/${id}/historial`, cookieStore);
+}
+
 export async function getOrden(id: number, cookieStore: CookieStore): Promise<Orden | null> {
   return fetchBackend<Orden>(`/ordenes/${id}`, cookieStore);
 }
