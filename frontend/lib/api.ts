@@ -514,6 +514,15 @@ export async function agregarServicioAPrenda(
   });
 }
 
+export type VerificacionPrenda = { prenda: number; coincide: boolean; observacion: string };
+
+/** Entrega la orden verificando cada prenda (HU12). El backend exige que este
+ * "Lista para entrega", que se verifiquen todas sus prendas una sola vez, la
+ * observacion de cada discrepancia y el pago completo (HU24). */
+export async function registrarEntrega(id: number, prendas: VerificacionPrenda[]): Promise<Response> {
+  return api(`/ordenes/${id}/entrega`, { method: "POST", body: { prendas } });
+}
+
 /** Avanza la orden por el flujo (HU14). El backend valida la transicion, el
  * abono y que el operario sea el asignado; "Entregada" va por /entrega (HU12). */
 export async function cambiarEstadoOrden(id: number, estado: EstadoOrden): Promise<Response> {

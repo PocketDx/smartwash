@@ -20,6 +20,7 @@ import AgregarPrenda from "./agregar-prenda";
 import AgregarServicio from "./agregar-servicio";
 import CambiarEstado from "./cambiar-estado";
 import PagosOrden from "./pagos-orden";
+import RegistrarEntrega from "./registrar-entrega";
 
 const ESTADOS_QUE_ADMITEN_LINEAS: EstadoOrden[] = ["En espera", "Recibida", "Clasificada"];
 
@@ -109,6 +110,7 @@ export default async function OrdenPage({
         </div>
       )}
 
+      {puedeEditar && orden.estado === "Lista para entrega" && <RegistrarEntrega orden={orden} />}
       <CambiarEstado orden={orden} usuario={user} />
 
       <ClayCard className="mb-6">

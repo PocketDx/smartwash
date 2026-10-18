@@ -10,6 +10,7 @@ const ETIQUETAS: Record<string, string> = {
   estado_inicial: "Estado al recibir",
   servicios: "Servicios",
   servicio: "Servicio",
+  observacion: "Observacion",
   estado: "Estado",
   monto: "Monto",
   metodo: "Metodo de pago",
