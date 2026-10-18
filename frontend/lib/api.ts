@@ -520,6 +520,19 @@ export async function cambiarEstadoOrden(id: number, estado: EstadoOrden): Promi
   return api(`/ordenes/${id}/estado`, { method: "POST", body: { estado } });
 }
 
+/** Lo que devuelve OperarioSerializer. /operarios lista solo los activos. */
+export type Operario = { id: number; username: string; nombre: string };
+
+export async function getOperarios(cookieStore: CookieStore): Promise<Operario[] | null> {
+  return fetchBackend<Operario[]>("/operarios", cookieStore);
+}
+
+/** Asigna o reasigna la orden (HU10). El backend valida el rol, el abono, que
+ * el operario este activo y que el estado de la orden lo permita. */
+export async function asignarOperario(id: number, operario: number): Promise<Response> {
+  return api(`/ordenes/${id}/asignacion`, { method: "POST", body: { operario } });
+}
+
 /* ------------------------------- Pagos de una orden (HU21) ------------------------------- */
 
 export type MetodoPago = "efectivo" | "transferencia" | "tarjeta";

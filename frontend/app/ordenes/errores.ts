@@ -13,6 +13,7 @@ const ETIQUETAS: Record<string, string> = {
   estado: "Estado",
   monto: "Monto",
   metodo: "Metodo de pago",
+  operario: "Operario",
 };
 
 const SIN_ETIQUETA = new Set(["non_field_errors", "detail"]);
