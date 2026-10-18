@@ -2,7 +2,7 @@ from django.db import transaction
 from django.db.models import Q
 from rest_framework import serializers
 
-from .models import Servicio, TipoPrenda, Tarifa
+from .models import Material, Servicio, Tarifa, TipoPrenda
 
 
 class ConAutoriaSerializer(serializers.ModelSerializer):
@@ -43,7 +43,13 @@ class ServicioSerializer(NombreUnicoMixin, ConAutoriaSerializer):
 class TipoPrendaSerializer(NombreUnicoMixin, ConAutoriaSerializer):
     class Meta:
         model = TipoPrenda
-        fields = ("id", "nombre", "material")
+        fields = ("id", "nombre")
+
+
+class MaterialSerializer(NombreUnicoMixin, ConAutoriaSerializer):
+    class Meta:
+        model = Material
+        fields = ("id", "nombre")
 
 
 class TarifaSerializer(ConAutoriaSerializer):

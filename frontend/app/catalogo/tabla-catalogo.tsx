@@ -2,8 +2,9 @@
 
 import { Fragment, useState, type ReactNode } from "react";
 
-import type { Servicio, TipoPrenda } from "@/lib/api";
+import type { Material, Servicio, TipoPrenda } from "@/lib/api";
 import { ClayButton, ClayCard } from "../components/ui/clay";
+import MaterialForm from "./material-form";
 import ServicioForm from "./servicio-form";
 import TipoPrendaForm from "./tipo-prenda-form";
 
@@ -105,9 +106,20 @@ export function TablaTiposPrenda({ tiposPrenda, editable }: { tiposPrenda: TipoP
       vacio="Todavia no hay tipos de prenda."
       columnas={(tipo) => [
         { titulo: "Tipo de prenda", valor: tipo.nombre },
-        { titulo: "Material", valor: tipo.material },
       ]}
       formulario={(tipo, terminar) => <TipoPrendaForm tipoPrenda={tipo} onTerminar={terminar} />}
+    />
+  );
+}
+
+export function TablaMateriales({ materiales, editable }: { materiales: Material[]; editable: boolean }) {
+  return (
+    <TablaEditable
+      filas={materiales}
+      editable={editable}
+      vacio="Todavia no hay materiales."
+      columnas={(material) => [{ titulo: "Material", valor: material.nombre }]}
+      formulario={(material, terminar) => <MaterialForm material={material} onTerminar={terminar} />}
     />
   );
 }

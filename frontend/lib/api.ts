@@ -248,7 +248,8 @@ export async function getTrazabilidad(
 
 /* --------------------------- Catalogo de servicios y tarifas (HU07) --------------------------- */
 
-export type TipoPrenda = { id: number; nombre: string; material: string };
+export type TipoPrenda = { id: number; nombre: string };
+export type Material = { id: number; nombre: string };
 export type Servicio = { id: number; nombre: string; descripcion: string };
 export type UnidadCobro = "kilo" | "prenda";
 
@@ -271,6 +272,10 @@ export async function getTiposPrenda(cookieStore: CookieStore): Promise<TipoPren
   return fetchBackend<TipoPrenda[]>("/catalogo/tipos-prenda", cookieStore);
 }
 
+export async function getMateriales(cookieStore: CookieStore): Promise<Material[] | null> {
+  return fetchBackend<Material[]>("/catalogo/materiales", cookieStore);
+}
+
 export async function getServicios(cookieStore: CookieStore): Promise<Servicio[] | null> {
   return fetchBackend<Servicio[]>("/catalogo/servicios", cookieStore);
 }
@@ -287,6 +292,17 @@ export async function getTarifas(
 
 export async function crearTipoPrenda(datos: Omit<TipoPrenda, "id">): Promise<Response> {
   return api("/catalogo/tipos-prenda", { method: "POST", body: datos });
+}
+
+export async function crearMaterial(datos: Omit<Material, "id">): Promise<Response> {
+  return api("/catalogo/materiales", { method: "POST", body: datos });
+}
+
+export async function actualizarMaterial(
+  id: number,
+  datos: Partial<Omit<Material, "id">>,
+): Promise<Response> {
+  return api(`/catalogo/materiales/${id}`, { method: "PATCH", body: datos });
 }
 
 export async function crearServicio(datos: Omit<Servicio, "id">): Promise<Response> {
@@ -394,6 +410,8 @@ export type PrendaDeOrden = {
   id: number;
   tipo_prenda: number;
   tipo_prenda_nombre: string;
+  material: number | null;
+  material_nombre: string | null;
   cantidad: number;
   peso: string | null;
   talla: string;
@@ -431,6 +449,7 @@ export type Orden = {
 /** Una linea de prenda tal como la recibe POST /ordenes y POST /ordenes/{id}/prendas. */
 export type PrendaFormulario = {
   tipo_prenda: number;
+  material: number;
   cantidad: number;
   peso: string | null;
   talla: string;
@@ -481,7 +500,7 @@ export async function getOrden(id: number, cookieStore: CookieStore): Promise<Or
 
 /** Lo que devuelve OrdenBandejaSerializer: sin cliente ni valores, solo lo que
  * el operario necesita para trabajar. */
-export type PrendaDeBandeja = Omit<PrendaDeOrden, "tipo_prenda" | "servicios"> & {
+export type PrendaDeBandeja = Omit<PrendaDeOrden, "tipo_prenda" | "material" | "servicios"> & {
   servicios: string[];
 };
 

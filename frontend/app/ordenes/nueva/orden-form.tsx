@@ -4,21 +4,23 @@ import { useRouter } from "next/navigation";
 import { useState, type FormEvent } from "react";
 
 import { AlertaErrores } from "@/app/catalogo/errores";
-import { crearOrden, type Cliente, type Orden, type Servicio, type Tarifa, type TipoPrenda } from "@/lib/api";
+import { crearOrden, type Cliente, type Material, type Orden, type Servicio, type Tarifa, type TipoPrenda } from "@/lib/api";
 import { formatCOP } from "@/lib/format";
 import { ClayButton, ClayCard, ClayField, ClaySelect } from "../../components/ui/clay";
-import { aFormularios, lineaVacia, nombresDeUnidades, subtotalEstimado, type LineaEditable } from "../cotizacion";
+import { aFormularios, erroresDeServicios, lineaVacia, nombresDeUnidades, subtotalEstimado, type LineaEditable } from "../cotizacion";
 import { mensajesDeOrden } from "../errores";
 import LineaPrenda from "../linea-prenda";
 
 export default function OrdenForm({
   clientes,
   tiposPrenda,
+  materiales,
   servicios,
   tarifas,
 }: {
   clientes: Cliente[];
   tiposPrenda: TipoPrenda[];
+  materiales: Material[];
   servicios: Servicio[];
   tarifas: Tarifa[];
 }) {
@@ -36,6 +38,11 @@ export default function OrdenForm({
 
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const faltantes = erroresDeServicios(lineas, tiposPrenda);
+    if (faltantes.length > 0) {
+      setErrores(faltantes);
+      return;
+    }
     setPending(true);
     setErrores([]);
 
@@ -79,6 +86,7 @@ export default function OrdenForm({
             titulo={`Prenda ${indice + 1}`}
             linea={linea}
             tiposPrenda={tiposPrenda}
+            materiales={materiales}
             servicios={servicios}
             tarifas={tarifas}
             onChange={(nueva) => actualizarLinea(linea.clave, nueva)}

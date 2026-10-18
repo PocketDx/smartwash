@@ -111,8 +111,8 @@ class OrdenAdmin(HistorialEnAltasMixin, AutoriaAdminMixin):
 
 @admin.register(Prenda)
 class PrendaAdmin(HistorialEnAltasMixin, AutoriaAdminMixin):
-    list_display = ("orden", "tipo_prenda", "cantidad")
-    list_filter = ("tipo_prenda",)
+    list_display = ("orden", "tipo_prenda", "material", "cantidad")
+    list_filter = ("tipo_prenda", "material")
     inlines = [OrdenServicioInline]
 
     def save_model(self, request, obj, form, change):

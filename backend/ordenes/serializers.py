@@ -4,7 +4,7 @@ from django.utils import timezone
 from rest_framework import serializers
 
 from accounts.models import User
-from catalogo.models import Servicio, Tarifa, TipoPrenda
+from catalogo.models import Material, Servicio, Tarifa, TipoPrenda
 from clientes.models import Cliente
 
 from .historial import operacion_sobre_orden, registrar_evento
@@ -96,6 +96,7 @@ def guardar_recalculo(orden, usuario):
 
 class PrendaEntradaSerializer(serializers.ModelSerializer):
     tipo_prenda = serializers.PrimaryKeyRelatedField(queryset=TipoPrenda.objects.all())
+    material = serializers.PrimaryKeyRelatedField(queryset=Material.objects.all())
     cantidad = serializers.IntegerField(min_value=1)
     peso = serializers.DecimalField(
         max_digits=7, decimal_places=2, min_value=Decimal("0.01"), required=False, allow_null=True
@@ -111,6 +112,7 @@ class PrendaEntradaSerializer(serializers.ModelSerializer):
         model = Prenda
         fields = (
             "tipo_prenda",
+            "material",
             "cantidad",
             "peso",
             "talla",
@@ -141,6 +143,7 @@ class OrdenServicioSerializer(serializers.ModelSerializer):
 
 class PrendaSerializer(serializers.ModelSerializer):
     tipo_prenda_nombre = serializers.CharField(source="tipo_prenda.nombre", read_only=True)
+    material_nombre = serializers.CharField(source="material.nombre", read_only=True, allow_null=True)
     servicios = OrdenServicioSerializer(many=True, read_only=True)
 
     class Meta:
@@ -149,6 +152,8 @@ class PrendaSerializer(serializers.ModelSerializer):
             "id",
             "tipo_prenda",
             "tipo_prenda_nombre",
+            "material",
+            "material_nombre",
             "cantidad",
             "peso",
             "talla",
@@ -345,7 +350,7 @@ class EntregaSerializer(serializers.Serializer):
     def verificar_contra(self, orden):
         """Devuelve el detalle para el historial; exige cada prenda una sola vez."""
         verificaciones = self.validated_data["prendas"]
-        registradas = {p.pk: p for p in orden.prendas.select_related("tipo_prenda")}
+        registradas = {p.pk: p for p in orden.prendas.select_related("tipo_prenda", "material")}
         if sorted(v["prenda"] for v in verificaciones) != sorted(registradas):
             raise serializers.ValidationError(
                 {"prendas": "Hay que verificar cada prenda de la orden, una sola vez."}
@@ -364,6 +369,7 @@ class EntregaSerializer(serializers.Serializer):
 
 class PrendaBandejaSerializer(serializers.ModelSerializer):
     tipo_prenda_nombre = serializers.CharField(source="tipo_prenda.nombre", read_only=True)
+    material_nombre = serializers.CharField(source="material.nombre", read_only=True, allow_null=True)
     servicios = serializers.SerializerMethodField()
 
     class Meta:
@@ -371,6 +377,7 @@ class PrendaBandejaSerializer(serializers.ModelSerializer):
         fields = (
             "id",
             "tipo_prenda_nombre",
+            "material_nombre",
             "cantidad",
             "peso",
             "talla",

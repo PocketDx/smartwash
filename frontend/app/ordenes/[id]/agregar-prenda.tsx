@@ -4,20 +4,22 @@ import { useRouter } from "next/navigation";
 import { useState, type FormEvent } from "react";
 
 import { AlertaErrores } from "@/app/catalogo/errores";
-import { agregarPrendaAOrden, type Servicio, type Tarifa, type TipoPrenda } from "@/lib/api";
+import { agregarPrendaAOrden, type Material, type Servicio, type Tarifa, type TipoPrenda } from "@/lib/api";
 import { ClayButton } from "../../components/ui/clay";
-import { aFormularios, lineaVacia, nombresDeUnidades, type LineaEditable } from "../cotizacion";
+import { aFormularios, erroresDeServicios, lineaVacia, nombresDeUnidades, type LineaEditable } from "../cotizacion";
 import { mensajesDeOrden } from "../errores";
 import LineaPrenda from "../linea-prenda";
 
 export default function AgregarPrenda({
   ordenId,
   tiposPrenda,
+  materiales,
   servicios,
   tarifas,
 }: {
   ordenId: number;
   tiposPrenda: TipoPrenda[];
+  materiales: Material[];
   servicios: Servicio[];
   tarifas: Tarifa[];
 }) {
@@ -34,6 +36,11 @@ export default function AgregarPrenda({
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!linea) return;
+    const faltantes = erroresDeServicios([linea], tiposPrenda);
+    if (faltantes.length > 0) {
+      setErrores(faltantes);
+      return;
+    }
     setPending(true);
     setErrores([]);
 
@@ -76,6 +83,7 @@ export default function AgregarPrenda({
         titulo="Prenda nueva"
         linea={linea}
         tiposPrenda={tiposPrenda}
+        materiales={materiales}
         servicios={servicios}
         tarifas={tarifas}
         onChange={setLinea}
