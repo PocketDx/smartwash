@@ -7,7 +7,7 @@ import { AlertaErrores } from "@/app/catalogo/errores";
 import { crearOrden, type Cliente, type Orden, type Servicio, type Tarifa, type TipoPrenda } from "@/lib/api";
 import { formatCOP } from "@/lib/format";
 import { ClayButton, ClayCard, ClayField, ClaySelect } from "../../components/ui/clay";
-import { aFormulario, lineaVacia, subtotalEstimado, type LineaEditable } from "../cotizacion";
+import { aFormularios, lineaVacia, nombresDeUnidades, subtotalEstimado, type LineaEditable } from "../cotizacion";
 import { mensajesDeOrden } from "../errores";
 import LineaPrenda from "../linea-prenda";
 
@@ -39,7 +39,7 @@ export default function OrdenForm({
     setPending(true);
     setErrores([]);
 
-    const response = await crearOrden(Number(cliente), lineas.map(aFormulario)).catch(() => null);
+    const response = await crearOrden(Number(cliente), lineas.flatMap(aFormularios)).catch(() => null);
 
     if (response?.ok) {
       const orden = (await response.json()) as Orden;
@@ -47,7 +47,7 @@ export default function OrdenForm({
       return;
     }
     setPending(false);
-    setErrores(await mensajesDeOrden(response, "No se pudo registrar la orden"));
+    setErrores(await mensajesDeOrden(response, "No se pudo registrar la orden", nombresDeUnidades(lineas, tiposPrenda)));
   }
 
   return (
@@ -95,7 +95,7 @@ export default function OrdenForm({
 
       <ClayCard>
         <p className="text-sm text-(--sw-ink-soft)">
-          Subtotal estimado:{" "}
+          Total estimado:{" "}
           <span className="text-lg font-bold text-(--sw-ink) tabular-nums">{formatCOP(subtotal)}</span>
         </p>
         <p className="mt-1 text-xs text-(--sw-ink-soft)">

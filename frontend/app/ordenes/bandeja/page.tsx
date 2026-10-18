@@ -2,9 +2,10 @@ import { cookies } from "next/headers";
 import Link from "next/link";
 import { redirect } from "next/navigation";
 
-import { getBandeja, getCurrentUser, type PrendaDeBandeja } from "@/lib/api";
+import { getBandeja, getCurrentUser } from "@/lib/api";
 import { formatFecha } from "@/lib/format";
 import { ClayBadge, ClayCard, Encabezado } from "../../components/ui/clay";
+import { agruparPrendas, detallesDe } from "../agrupar";
 import { COLOR_ESTADO } from "../tabla-ordenes";
 
 function Mensaje({ children }: { children: string }) {
@@ -13,15 +14,6 @@ function Mensaje({ children }: { children: string }) {
       <p className="text-sm text-(--sw-ink-soft)">{children}</p>
     </ClayCard>
   );
-}
-
-function detalles(prenda: PrendaDeBandeja): string[] {
-  return [
-    prenda.peso && `${prenda.peso} kg`,
-    prenda.talla && `talla ${prenda.talla}`,
-    prenda.genero,
-    prenda.color,
-  ].filter((d): d is string => Boolean(d));
 }
 
 export default async function BandejaPage() {
@@ -59,20 +51,24 @@ export default async function BandejaPage() {
                 <ClayBadge color={COLOR_ESTADO[orden.estado]}>{orden.estado}</ClayBadge>
               </div>
               <ul className="mt-4 flex flex-col gap-2 text-sm">
-                {orden.prendas.map((prenda) => (
-                  <li key={prenda.id} className="border-t border-(--sw-hairline) pt-2">
-                    <p className="font-semibold text-(--sw-ink)">
-                      {prenda.cantidad} × {prenda.tipo_prenda_nombre}
-                      <span className="font-normal text-(--sw-ink-soft)"> · {prenda.servicios.join(", ")}</span>
-                    </p>
-                    {detalles(prenda).length > 0 && (
-                      <p className="mt-0.5 text-xs text-(--sw-ink-soft)">{detalles(prenda).join(" · ")}</p>
-                    )}
-                    {prenda.estado_inicial && (
-                      <p className="mt-0.5 text-xs text-(--sw-ink-soft)">Al recibir: {prenda.estado_inicial}</p>
-                    )}
-                  </li>
-                ))}
+                {agruparPrendas(orden.prendas, (p) => p.servicios.join(",")).map((grupo) => {
+                  const [prenda] = grupo.prendas;
+                  const detalles = detallesDe(grupo);
+                  return (
+                    <li key={prenda.id} className="border-t border-(--sw-hairline) pt-2">
+                      <p className="font-semibold text-(--sw-ink)">
+                        {grupo.cantidad} × {prenda.tipo_prenda_nombre}
+                        <span className="font-normal text-(--sw-ink-soft)"> · {prenda.servicios.join(", ")}</span>
+                      </p>
+                      {detalles.length > 0 && (
+                        <p className="mt-0.5 text-xs text-(--sw-ink-soft)">{detalles.join(" · ")}</p>
+                      )}
+                      {prenda.estado_inicial && (
+                        <p className="mt-0.5 text-xs text-(--sw-ink-soft)">Al recibir: {prenda.estado_inicial}</p>
+                      )}
+                    </li>
+                  );
+                })}
               </ul>
             </ClayCard>
           ))}
