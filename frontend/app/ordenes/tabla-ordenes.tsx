@@ -3,6 +3,7 @@ import Link from "next/link";
 import type { Orden } from "@/lib/api";
 import { formatCOP } from "@/lib/format";
 import { ClayBadge, ClayCard } from "../components/ui/clay";
+import EstadoAbono from "./abono";
 
 export const COLOR_ESTADO: Record<Orden["estado"], "blue" | "mint" | "lavender" | "peach"> = {
   Recibida: "blue",
@@ -33,6 +34,7 @@ export default function TablaOrdenes({ ordenes }: { ordenes: Orden[] }) {
             <th className="px-5 py-3">Cliente</th>
             <th className="px-5 py-3">Estado</th>
             <th className="px-5 py-3">Pago</th>
+            <th className="px-5 py-3">Abono</th>
             <th className="px-5 py-3">Total</th>
           </tr>
         </thead>
@@ -49,6 +51,9 @@ export default function TablaOrdenes({ ordenes }: { ordenes: Orden[] }) {
                 <ClayBadge color={COLOR_ESTADO[orden.estado]}>{orden.estado}</ClayBadge>
               </td>
               <td data-label="Pago" className="px-5 py-3 text-(--sw-ink-soft)">{orden.estado_pago}</td>
+              <td data-label="Abono" className="px-5 py-3">
+                <EstadoAbono orden={orden} />
+              </td>
               <td data-label="Total" className="px-5 py-3 font-semibold text-(--sw-ink) tabular-nums">
                 {formatCOP(orden.valor_total)}
               </td>

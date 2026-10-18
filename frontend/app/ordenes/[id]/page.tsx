@@ -14,6 +14,7 @@ import {
 } from "@/lib/api";
 import { formatCOP, formatFecha } from "@/lib/format";
 import { ClayBadge, ClayCard, Encabezado } from "../../components/ui/clay";
+import EstadoAbono from "../abono";
 import { tarifasDeHoy } from "../cotizacion";
 import { COLOR_ESTADO } from "../tabla-ordenes";
 import AgregarPrenda from "./agregar-prenda";
@@ -118,7 +119,12 @@ export default async function OrdenPage({
             {Number(orden.descuento) > 0 ? `− ${formatCOP(orden.descuento)}` : formatCOP(0)}
           </Dato>
           <Dato etiqueta="Valor total">{formatCOP(orden.valor_total)}</Dato>
-          <Dato etiqueta="Abono requerido (30 %)">{formatCOP(orden.abono_requerido)}</Dato>
+          <Dato etiqueta="Abono requerido (30 %)">
+            <span className="block">{formatCOP(orden.abono_requerido)}</span>
+            <span className="mt-1 inline-block">
+              <EstadoAbono orden={orden} />
+            </span>
+          </Dato>
           <Dato etiqueta="Pagado">{formatCOP(orden.total_pagado)}</Dato>
           <Dato etiqueta="Saldo pendiente">{formatCOP(orden.saldo_pendiente)}</Dato>
           <Dato etiqueta="Duracion estimada">
