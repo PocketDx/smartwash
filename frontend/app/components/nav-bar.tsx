@@ -30,7 +30,10 @@ const POR_ROL: Record<Rol, Enlace[]> = {
     { href: "/catalogo", label: "Catalogo" },
     { href: "/ordenes", label: "Ordenes" },
   ],
-  operario: [{ href: "/ordenes", label: "Ordenes" }],
+  operario: [
+    { href: "/ordenes/bandeja", label: "Mi bandeja" },
+    { href: "/ordenes", label: "Ordenes" },
+  ],
 };
 
 export default async function NavBar() {
