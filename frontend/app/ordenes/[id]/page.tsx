@@ -18,6 +18,7 @@ import { ClayBadge, ClayCard, Encabezado } from "../../components/ui/clay";
 import EstadoAbono from "../abono";
 import { tarifasDeHoy } from "../cotizacion";
 import { COLOR_ESTADO } from "../tabla-ordenes";
+import { agruparPrendas, detallesDe } from "../agrupar";
 import AgregarPrenda from "./agregar-prenda";
 import AgregarServicio from "./agregar-servicio";
 import AsignarOperario from "./asignar-operario";
@@ -156,17 +157,15 @@ export default async function OrdenPage({
 
       <h2 className="mb-3 text-lg font-bold text-(--sw-ink)">Prendas</h2>
       <div className="flex flex-col gap-3">
-        {orden.detalle_prendas.map((prenda) => {
-          const detalles = [
-            prenda.peso && `${prenda.peso} kg`,
-            prenda.talla && `talla ${prenda.talla}`,
-            prenda.genero,
-            prenda.color,
-          ].filter(Boolean);
+        {agruparPrendas(orden.detalle_prendas, (p) =>
+          p.servicios.map((x) => `${x.servicio}:${Number(x.valor_aplicado)}`).sort().join(","),
+        ).map((grupo) => {
+          const [prenda] = grupo.prendas;
+          const detalles = detallesDe(grupo);
           return (
             <ClayCard key={prenda.id} className="p-4">
               <p className="font-semibold text-(--sw-ink)">
-                {prenda.cantidad} × {prenda.tipo_prenda_nombre}
+                {grupo.cantidad} × {prenda.tipo_prenda_nombre}
               </p>
               {detalles.length > 0 && (
                 <p className="mt-0.5 text-xs text-(--sw-ink-soft)">{detalles.join(" · ")}</p>
@@ -175,14 +174,16 @@ export default async function OrdenPage({
                 <p className="mt-0.5 text-xs text-(--sw-ink-soft)">Al recibir: {prenda.estado_inicial}</p>
               )}
               <ul className="mt-3 flex flex-col gap-1 text-sm">
-                {prenda.servicios.map((s) => (
+                {prenda.servicios.map((s, i) => (
                   <li key={s.id} className="flex justify-between gap-4">
                     <span className="text-(--sw-ink)">
                       {s.servicio_nombre}{" "}
                       <span className="text-xs text-(--sw-ink-soft)">(por {s.unidad_cobro})</span>
                     </span>
                     <span className="font-semibold text-(--sw-ink) tabular-nums">
-                      {formatCOP(s.valor_aplicado)}
+                      {formatCOP(
+                        grupo.prendas.reduce((suma, p) => suma + Number(p.servicios[i].valor_aplicado), 0),
+                      )}
                     </span>
                   </li>
                 ))}
@@ -190,7 +191,7 @@ export default async function OrdenPage({
               {conCatalogo && servicios && (
                 <AgregarServicio
                   ordenId={orden.id}
-                  prenda={prenda}
+                  prendas={grupo.prendas}
                   servicios={servicios}
                   tarifas={tarifasVigentes}
                 />

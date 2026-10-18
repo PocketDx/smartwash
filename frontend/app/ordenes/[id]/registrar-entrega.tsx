@@ -32,6 +32,10 @@ export default function RegistrarEntrega({ orden }: { orden: Orden }) {
     setRevisiones((actual) => ({ ...actual, [prenda]: { ...actual[prenda], ...cambios } }));
   }
 
+  function marcarTodas() {
+    setRevisiones(Object.fromEntries(orden.detalle_prendas.map((p) => [p.id, { coincide: true, observacion: "" }])));
+  }
+
   function cancelar() {
     setAbierto(false);
     setRevisiones(revisionesVacias(orden));
@@ -94,6 +98,11 @@ export default function RegistrarEntrega({ orden }: { orden: Orden }) {
     <ClayCard className="mb-6">
       <h2 className="text-sm font-bold text-(--sw-ink)">Registrar entrega</h2>
       <form onSubmit={onSubmit} className="mt-3 flex flex-col gap-4">
+        <div>
+          <ClayButton type="button" variant="secundario" onClick={marcarTodas}>
+            Marcar todas como coincide
+          </ClayButton>
+        </div>
         {orden.detalle_prendas.map((prenda, indice) => {
           const revision = revisiones[prenda.id];
           const nombre = `prenda-${prenda.id}`;

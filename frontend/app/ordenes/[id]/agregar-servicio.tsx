@@ -12,16 +12,17 @@ import { mensajesDeOrden } from "../errores";
 
 export default function AgregarServicio({
   ordenId,
-  prenda,
+  prendas,
   servicios,
   tarifas,
 }: {
   ordenId: number;
-  prenda: PrendaDeOrden;
+  prendas: PrendaDeOrden[];
   servicios: Servicio[];
   tarifas: Tarifa[];
 }) {
   const router = useRouter();
+  const prenda = prendas[0];
   const [servicio, setServicio] = useState("");
   const [errores, setErrores] = useState<string[]>([]);
   const [pending, setPending] = useState(false);
@@ -37,15 +38,18 @@ export default function AgregarServicio({
     setPending(true);
     setErrores([]);
 
-    const response = await agregarServicioAPrenda(ordenId, prenda.id, Number(servicio)).catch(() => null);
-    setPending(false);
-
-    if (response?.ok) {
-      setServicio("");
-      router.refresh();
-      return;
+    let agregados = 0;
+    for (const p of prendas) {
+      const response = await agregarServicioAPrenda(ordenId, p.id, Number(servicio)).catch(() => null);
+      if (!response?.ok) {
+        setErrores(await mensajesDeOrden(response, "No se pudo agregar el servicio"));
+        break;
+      }
+      agregados += 1;
     }
-    setErrores(await mensajesDeOrden(response, "No se pudo agregar el servicio"));
+    setPending(false);
+    if (agregados > 0) router.refresh();
+    if (agregados === prendas.length) setServicio("");
   }
 
   return (
