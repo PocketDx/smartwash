@@ -6,7 +6,7 @@ import { useState, type FormEvent } from "react";
 import { AlertaErrores } from "@/app/catalogo/errores";
 import { agregarPrendaAOrden, type Servicio, type Tarifa, type TipoPrenda } from "@/lib/api";
 import { ClayButton } from "../../components/ui/clay";
-import { aFormulario, lineaVacia, type LineaEditable } from "../cotizacion";
+import { aFormularios, lineaVacia, nombresDeUnidades, type LineaEditable } from "../cotizacion";
 import { mensajesDeOrden } from "../errores";
 import LineaPrenda from "../linea-prenda";
 
@@ -37,15 +37,29 @@ export default function AgregarPrenda({
     setPending(true);
     setErrores([]);
 
-    const response = await agregarPrendaAOrden(ordenId, aFormulario(linea)).catch(() => null);
-    setPending(false);
-
-    if (response?.ok) {
-      cerrar();
-      router.refresh();
-      return;
+    const prendas = aFormularios(linea);
+    const nombres = nombresDeUnidades([linea], tiposPrenda);
+    let creadas = 0;
+    for (const prenda of prendas) {
+      const response = await agregarPrendaAOrden(ordenId, prenda).catch(() => null);
+      if (!response?.ok) {
+        const mensajes = await mensajesDeOrden(response, "No se pudo agregar la prenda");
+        setErrores(mensajes.map((m) => `${nombres[creadas]} · ${m}`));
+        break;
+      }
+      creadas += 1;
     }
-    setErrores(await mensajesDeOrden(response, "No se pudo agregar la prenda"));
+    setPending(false);
+    if (creadas > 0) router.refresh();
+    if (creadas === prendas.length) cerrar();
+    else if (creadas > 0) {
+      // Las ya creadas quedan en la orden: se quitan del formulario para no duplicarlas al reintentar.
+      setLinea(
+        linea.detallar
+          ? { ...linea, cantidad: String(prendas.length - creadas), unidades: linea.unidades.slice(creadas) }
+          : { ...linea, cantidad: String(prendas.length - creadas) },
+      );
+    }
   }
 
   if (!linea) {
