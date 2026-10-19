@@ -5,6 +5,7 @@ from rest_framework import serializers
 
 from accounts.models import User
 from catalogo.models import Material, Servicio, Tarifa, TipoPrenda
+from catalogo.precios import calcular_precio
 from clientes.models import Cliente
 
 from .historial import operacion_sobre_orden, registrar_evento
@@ -54,25 +55,35 @@ def exigir_orden_editable(orden):
         )
 
 
-def tarifa_vigente(tipo_prenda, servicio):
-    tarifa = Tarifa.objects.vigente(tipo_prenda, servicio, timezone.localdate())
+def tarifa_aplicable(tipo_prenda, servicio):
+    tarifa = Tarifa.objects.aplicable(tipo_prenda, servicio, timezone.localdate())
     if tarifa is None:
         raise serializers.ValidationError(
-            f'No hay tarifa vigente para "{tipo_prenda}" con "{servicio}".'
+            f'No hay tarifa vigente para "{servicio}" (ni general ni para "{tipo_prenda}").'
         )
     return tarifa
 
 
-def exigir_peso(peso, tarifas):
-    if peso is None and any(t.unidad_cobro == Tarifa.UnidadCobro.KILO for t in tarifas):
+def exigir_peso_registrado(prenda):
+    if prenda.peso is None:
         raise serializers.ValidationError(
-            {"peso": "Es obligatorio cuando algun servicio se cobra por kilo."}
+            "La prenda no tiene peso registrado y el precio depende del peso."
         )
 
 
 def agregar_servicio(prenda, tarifa, usuario):
-    unidades = prenda.peso if tarifa.unidad_cobro == Tarifa.UnidadCobro.KILO else prenda.cantidad
-    linea = OrdenServicio(prenda=prenda, tarifa=tarifa, valor_aplicado=tarifa.valor * unidades)
+    precio = calcular_precio(tarifa, prenda.peso, prenda.material)
+    linea = OrdenServicio(
+        prenda=prenda,
+        tarifa=tarifa,
+        valor_aplicado=precio.precio_unitario * prenda.cantidad,
+        valor_base=tarifa.valor_base,
+        precio_por_kilo=tarifa.precio_por_kilo,
+        peso=prenda.peso,
+        nivel_dificultad=precio.nivel,
+        factor=precio.factor,
+        es_excepcion=precio.es_excepcion,
+    )
     linea.registrar_autoria(usuario)
     linea.save()
     return linea
@@ -98,9 +109,7 @@ class PrendaEntradaSerializer(serializers.ModelSerializer):
     tipo_prenda = serializers.PrimaryKeyRelatedField(queryset=TipoPrenda.objects.all())
     material = serializers.PrimaryKeyRelatedField(queryset=Material.objects.all())
     cantidad = serializers.IntegerField(min_value=1)
-    peso = serializers.DecimalField(
-        max_digits=7, decimal_places=2, min_value=Decimal("0.01"), required=False, allow_null=True
-    )
+    peso = serializers.DecimalField(max_digits=7, decimal_places=2, min_value=Decimal("0.01"))
     servicios = serializers.PrimaryKeyRelatedField(
         queryset=Servicio.objects.all(),
         many=True,
@@ -126,19 +135,28 @@ class PrendaEntradaSerializer(serializers.ModelSerializer):
         servicios = attrs.pop("servicios")
         if len(set(servicios)) != len(servicios):
             raise serializers.ValidationError({"servicios": "Hay servicios repetidos."})
-        attrs["tarifas"] = [tarifa_vigente(attrs["tipo_prenda"], s) for s in servicios]
-        exigir_peso(attrs.get("peso"), attrs["tarifas"])
+        attrs["tarifas"] = [tarifa_aplicable(attrs["tipo_prenda"], s) for s in servicios]
         return attrs
 
 
 class OrdenServicioSerializer(serializers.ModelSerializer):
     servicio = serializers.IntegerField(source="tarifa.servicio_id", read_only=True)
     servicio_nombre = serializers.CharField(source="tarifa.servicio.nombre", read_only=True)
-    unidad_cobro = serializers.CharField(source="tarifa.unidad_cobro", read_only=True)
 
     class Meta:
         model = OrdenServicio
-        fields = ("id", "servicio", "servicio_nombre", "unidad_cobro", "valor_aplicado")
+        fields = (
+            "id",
+            "servicio",
+            "servicio_nombre",
+            "valor_aplicado",
+            "valor_base",
+            "precio_por_kilo",
+            "peso",
+            "nivel_dificultad",
+            "factor",
+            "es_excepcion",
+        )
 
 
 class PrendaSerializer(serializers.ModelSerializer):
@@ -317,9 +335,8 @@ class AgregarServicioSerializer(serializers.Serializer):
         prenda = self.context["prenda"]
         if prenda.servicios.filter(tarifa__servicio=servicio).exists():
             raise serializers.ValidationError("La prenda ya tiene este servicio.")
-        tarifa = tarifa_vigente(prenda.tipo_prenda, servicio)
-        exigir_peso(prenda.peso, [tarifa])
-        return tarifa
+        exigir_peso_registrado(prenda)
+        return tarifa_aplicable(prenda.tipo_prenda, servicio)
 
 
 class CambioEstadoSerializer(serializers.Serializer):

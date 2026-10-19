@@ -1,13 +1,14 @@
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 
-import { getCurrentUser, getMateriales, getServicios, getTarifas, getTiposPrenda } from "@/lib/api";
+import { getCurrentUser, getMateriales, getNivelesDificultad, getServicios, getTarifas, getTiposPrenda } from "@/lib/api";
 import { ClayCard, Encabezado } from "../components/ui/clay";
 import FiltroVigencia from "./filtro-vigencia";
 import MaterialForm from "./material-form";
+import NivelForm from "./nivel-form";
 import ServicioForm from "./servicio-form";
 import TablaTarifas from "./tabla-tarifas";
-import { TablaMateriales, TablaServicios, TablaTiposPrenda } from "./tabla-catalogo";
+import { TablaMateriales, TablaNiveles, TablaServicios, TablaTiposPrenda } from "./tabla-catalogo";
 import TarifaForm from "./tarifa-form";
 import TipoPrendaForm from "./tipo-prenda-form";
 
@@ -32,8 +33,9 @@ export default async function CatalogoPage({
   const puedeEditar = user.rol === "administrador";
 
   const soloVigentes = (await searchParams).vigentes === "1";
-  const [tiposPrenda, materiales, servicios, tarifas] = await Promise.all([
+  const [tiposPrenda, niveles, materiales, servicios, tarifas] = await Promise.all([
     getTiposPrenda(cookieStore),
+    getNivelesDificultad(cookieStore),
     getMateriales(cookieStore),
     getServicios(cookieStore),
     getTarifas(cookieStore, soloVigentes),
@@ -43,8 +45,8 @@ export default async function CatalogoPage({
     <main className="mx-auto max-w-5xl px-4 py-8 sm:px-8 sm:py-12">
       <Encabezado eyebrow="Administracion · EP03" titulo="Catalogo">
         {puedeEditar
-          ? "Administra tipos de prenda, materiales, servicios y las tarifas por tipo de prenda y servicio (HU07)."
-          : "Consulta tipos de prenda, materiales, servicios y las tarifas por tipo de prenda y servicio (HU07)."}
+          ? "Administra tipos de prenda, materiales, servicios y las tarifas por servicio (HU07)."
+          : "Consulta tipos de prenda, materiales, servicios y las tarifas por servicio (HU07)."}
       </Encabezado>
 
       {puedeEditar && (
@@ -63,15 +65,32 @@ export default async function CatalogoPage({
 
       {puedeEditar && (
         <ClayCard className="mb-4">
+          <h2 className="sw-eyebrow">Nuevo nivel de dificultad</h2>
+          <p className="mt-2 text-sm text-(--sw-ink-soft)">
+            El factor multiplica el precio de todos los servicios de las prendas cuyo material tenga ese nivel.
+          </p>
+          <NivelForm className="mt-4" />
+        </ClayCard>
+      )}
+      <div className="mb-6">
+        {niveles === null ? (
+          <ErrorDeCarga recurso="los niveles de dificultad" />
+        ) : (
+          <TablaNiveles niveles={niveles} editable={puedeEditar} />
+        )}
+      </div>
+
+      {puedeEditar && (
+        <ClayCard className="mb-4">
           <h2 className="sw-eyebrow">Nuevo material</h2>
-          <MaterialForm className="mt-4" />
+          <MaterialForm niveles={niveles ?? []} className="mt-4" />
         </ClayCard>
       )}
       <div className="mb-6">
         {materiales === null ? (
           <ErrorDeCarga recurso="los materiales" />
         ) : (
-          <TablaMateriales materiales={materiales} editable={puedeEditar} />
+          <TablaMateriales materiales={materiales} niveles={niveles ?? []} editable={puedeEditar} />
         )}
       </div>
 
@@ -89,20 +108,45 @@ export default async function CatalogoPage({
         )}
       </div>
 
+      <p className="mb-4 text-sm text-(--sw-ink-soft)">
+        El precio de un servicio es (valor base por prenda + peso en kg x precio por kilo) x el factor del
+        material, redondeado a la centena. Si hay una excepcion vigente para el tipo de prenda se usa esa;
+        si no, la tarifa general del servicio.
+      </p>
       {puedeEditar && (
-        <ClayCard className="mb-6">
-          <h2 className="sw-eyebrow">Nueva tarifa</h2>
+        <ClayCard className="mb-4">
+          <h2 className="sw-eyebrow">Nueva tarifa general por servicio</h2>
           <div className="mt-4">
-            <TarifaForm tiposPrenda={tiposPrenda ?? []} servicios={servicios ?? []} />
+            <TarifaForm tiposPrenda={[]} servicios={servicios ?? []} general />
           </div>
         </ClayCard>
       )}
-
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-        <h2 className="sw-eyebrow">Tarifas</h2>
+        <h2 className="sw-eyebrow">Tarifas generales por servicio</h2>
         <FiltroVigencia soloVigentes={soloVigentes} />
       </div>
-      {tarifas === null ? <ErrorDeCarga recurso="las tarifas" /> : <TablaTarifas tarifas={tarifas} editable={puedeEditar} />}
+      <div className="mb-6">
+        {tarifas === null ? (
+          <ErrorDeCarga recurso="las tarifas" />
+        ) : (
+          <TablaTarifas tarifas={tarifas.filter((t) => t.tipo_prenda === null)} editable={puedeEditar} conTipo={false} />
+        )}
+      </div>
+
+      {puedeEditar && (
+        <ClayCard className="mb-4">
+          <h2 className="sw-eyebrow">Nueva excepcion por tipo de prenda (opcional)</h2>
+          <div className="mt-4">
+            <TarifaForm tiposPrenda={tiposPrenda ?? []} servicios={servicios ?? []} general={false} />
+          </div>
+        </ClayCard>
+      )}
+      <h2 className="sw-eyebrow mb-4">Excepciones por tipo de prenda</h2>
+      {tarifas === null ? (
+        <ErrorDeCarga recurso="las tarifas" />
+      ) : (
+        <TablaTarifas tarifas={tarifas.filter((t) => t.tipo_prenda !== null)} editable={puedeEditar} conTipo />
+      )}
     </main>
   );
 }

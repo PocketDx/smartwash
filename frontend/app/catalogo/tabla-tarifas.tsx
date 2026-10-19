@@ -3,19 +3,25 @@
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 
-import { actualizarTarifa, type Tarifa, type UnidadCobro } from "@/lib/api";
+import { actualizarTarifa, type Tarifa } from "@/lib/api";
 import { formatCOP, formatFecha } from "@/lib/format";
-import { ClayBadge, ClayButton, ClayCard, ClayInput, ClaySelect } from "../components/ui/clay";
+import { ClayBadge, ClayButton, ClayCard, ClayInput } from "../components/ui/clay";
 import { AlertaErrores, mensajesDeError } from "./errores";
 import { ETIQUETAS_TARIFA } from "./tarifa-form";
 
-const ETIQUETA_UNIDAD: Record<UnidadCobro, string> = { kilo: "Por kilo", prenda: "Por prenda" };
-
-export default function TablaTarifas({ tarifas, editable }: { tarifas: Tarifa[]; editable: boolean }) {
+export default function TablaTarifas({
+  tarifas,
+  editable,
+  conTipo,
+}: {
+  tarifas: Tarifa[];
+  editable: boolean;
+  conTipo: boolean;
+}) {
   const router = useRouter();
   const [editando, setEditando] = useState<Tarifa | null>(null);
-  const [valor, setValor] = useState("");
-  const [unidad, setUnidad] = useState<UnidadCobro>("kilo");
+  const [valorBase, setValorBase] = useState("");
+  const [precioKilo, setPrecioKilo] = useState("");
   const [plazo, setPlazo] = useState("");
   const [hasta, setHasta] = useState("");
   const [errores, setErrores] = useState<string[]>([]);
@@ -31,8 +37,8 @@ export default function TablaTarifas({ tarifas, editable }: { tarifas: Tarifa[];
 
   function empezarEdicion(tarifa: Tarifa) {
     setEditando(tarifa);
-    setValor(tarifa.valor);
-    setUnidad(tarifa.unidad_cobro);
+    setValorBase(tarifa.valor_base);
+    setPrecioKilo(tarifa.precio_por_kilo);
     setPlazo(String(tarifa.plazo_entrega_dias));
     setHasta(tarifa.vigente_hasta ?? "");
     setErrores([]);
@@ -48,8 +54,8 @@ export default function TablaTarifas({ tarifas, editable }: { tarifas: Tarifa[];
     setPending(true);
     setErrores([]);
     const response = await actualizarTarifa(editando.id, {
-      valor,
-      unidad_cobro: unidad,
+      valor_base: valorBase,
+      precio_por_kilo: precioKilo,
       plazo_entrega_dias: Number(plazo),
       vigente_hasta: hasta === "" ? null : hasta,
     }).catch(() => null);
@@ -68,10 +74,10 @@ export default function TablaTarifas({ tarifas, editable }: { tarifas: Tarifa[];
       <table className="sw-tabla w-full text-left text-sm">
         <thead>
           <tr className="text-xs font-bold tracking-wide text-(--sw-ink-soft) uppercase">
-            <th className="px-5 py-3">Prenda</th>
             <th className="px-5 py-3">Servicio</th>
-            <th className="px-5 py-3">Valor</th>
-            <th className="px-5 py-3">Unidad</th>
+            {conTipo && <th className="px-5 py-3">Tipo de prenda</th>}
+            <th className="px-5 py-3">Valor base por prenda</th>
+            <th className="px-5 py-3">Precio por kilo</th>
             <th className="px-5 py-3">Plazo</th>
             <th className="px-5 py-3">Vigencia</th>
             {editable && (
@@ -88,19 +94,18 @@ export default function TablaTarifas({ tarifas, editable }: { tarifas: Tarifa[];
               <FilaTarifa
                 key={tarifa.id}
                 tarifa={tarifa}
-                prenda={tarifa.tipo_prenda_nombre}
-                servicio={tarifa.servicio_nombre}
+                conTipo={conTipo}
                 enEdicion={enEdicion}
                 editable={editable}
                 deshabilitado={editando !== null && !enEdicion}
-                valor={valor}
-                unidad={unidad}
+                valorBase={valorBase}
+                precioKilo={precioKilo}
                 plazo={plazo}
                 hasta={hasta}
                 pending={pending}
                 errores={enEdicion ? errores : []}
-                onValor={setValor}
-                onUnidad={setUnidad}
+                onValorBase={setValorBase}
+                onPrecioKilo={setPrecioKilo}
                 onPlazo={setPlazo}
                 onHasta={setHasta}
                 onEditar={() => empezarEdicion(tarifa)}
@@ -117,19 +122,18 @@ export default function TablaTarifas({ tarifas, editable }: { tarifas: Tarifa[];
 
 function FilaTarifa({
   tarifa,
-  prenda,
-  servicio,
+  conTipo,
   enEdicion,
   editable,
   deshabilitado,
-  valor,
-  unidad,
+  valorBase,
+  precioKilo,
   plazo,
   hasta,
   pending,
   errores,
-  onValor,
-  onUnidad,
+  onValorBase,
+  onPrecioKilo,
   onPlazo,
   onHasta,
   onEditar,
@@ -137,19 +141,18 @@ function FilaTarifa({
   onCancelar,
 }: {
   tarifa: Tarifa;
-  prenda: string;
-  servicio: string;
+  conTipo: boolean;
   enEdicion: boolean;
   editable: boolean;
   deshabilitado: boolean;
-  valor: string;
-  unidad: UnidadCobro;
+  valorBase: string;
+  precioKilo: string;
   plazo: string;
   hasta: string;
   pending: boolean;
   errores: string[];
-  onValor: (valor: string) => void;
-  onUnidad: (unidad: UnidadCobro) => void;
+  onValorBase: (valor: string) => void;
+  onPrecioKilo: (valor: string) => void;
   onPlazo: (plazo: string) => void;
   onHasta: (hasta: string) => void;
   onEditar: () => void;
@@ -159,32 +162,35 @@ function FilaTarifa({
   return (
     <>
       <tr className="border-t border-(--sw-hairline)">
-        <td data-label="Prenda" className="px-5 py-3 font-semibold text-(--sw-ink)">{prenda}</td>
-        <td data-label="Servicio" className="px-5 py-3 text-(--sw-ink-soft)">{servicio}</td>
+        <td data-label="Servicio" className="px-5 py-3 font-semibold text-(--sw-ink)">{tarifa.servicio_nombre}</td>
+        {conTipo && (
+          <td data-label="Tipo de prenda" className="px-5 py-3 text-(--sw-ink-soft)">{tarifa.tipo_prenda_nombre}</td>
+        )}
         {enEdicion ? (
           <>
-            <td data-label="Valor" className="px-5 py-3">
+            <td data-label="Valor base por prenda" className="px-5 py-3">
               <ClayInput
-                aria-label="Valor (COP)"
+                aria-label="Valor base por prenda (COP)"
                 type="number"
                 min="0"
                 step="0.01"
-                value={valor}
-                onChange={(event) => onValor(event.target.value)}
+                value={valorBase}
+                onChange={(event) => onValorBase(event.target.value)}
                 className="min-w-24"
                 required
               />
             </td>
-            <td data-label="Unidad" className="px-5 py-3">
-              <ClaySelect
-                aria-label="Unidad de cobro"
-                value={unidad}
-                onChange={(event) => onUnidad(event.target.value === "prenda" ? "prenda" : "kilo")}
-                className="min-w-28"
-              >
-                <option value="kilo">Por kilo</option>
-                <option value="prenda">Por prenda</option>
-              </ClaySelect>
+            <td data-label="Precio por kilo" className="px-5 py-3">
+              <ClayInput
+                aria-label="Precio por kilo (COP)"
+                type="number"
+                min="0"
+                step="0.01"
+                value={precioKilo}
+                onChange={(event) => onPrecioKilo(event.target.value)}
+                className="min-w-24"
+                required
+              />
             </td>
             <td data-label="Plazo" className="px-5 py-3">
               <ClayInput
@@ -219,11 +225,11 @@ function FilaTarifa({
           </>
         ) : (
           <>
-            <td data-label="Valor" className="px-5 py-3 font-semibold text-(--sw-ink) tabular-nums">
-              {formatCOP(tarifa.valor)}
+            <td data-label="Valor base por prenda" className="px-5 py-3 font-semibold text-(--sw-ink) tabular-nums">
+              {formatCOP(tarifa.valor_base)}
             </td>
-            <td data-label="Unidad" className="px-5 py-3 text-(--sw-ink-soft)">
-              {ETIQUETA_UNIDAD[tarifa.unidad_cobro]}
+            <td data-label="Precio por kilo" className="px-5 py-3 font-semibold text-(--sw-ink) tabular-nums">
+              {formatCOP(tarifa.precio_por_kilo)}
             </td>
             <td data-label="Plazo" className="px-5 py-3 text-(--sw-ink-soft)">{tarifa.plazo_entrega_dias} dias</td>
             <td data-label="Vigencia" className="px-5 py-3">

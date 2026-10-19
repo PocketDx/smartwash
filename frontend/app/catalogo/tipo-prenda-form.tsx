@@ -8,7 +8,7 @@ import { cx } from "@/lib/cx";
 import { ClayButton, ClayField, ClayInput } from "../components/ui/clay";
 import { AlertaErrores, mensajesDeError } from "./errores";
 
-const ETIQUETAS = { nombre: "Nombre" };
+const ETIQUETAS = { nombre: "Nombre", peso_estandar: "Peso estandar" };
 
 export default function TipoPrendaForm({
   tipoPrenda,
@@ -37,6 +37,7 @@ export default function TipoPrendaForm({
     const form = new FormData(formulario);
     const datos = {
       nombre: String(form.get("nombre") ?? "").trim(),
+      peso_estandar: String(form.get("peso_estandar") ?? "").trim() || null,
     };
     const response = await (
       tipoPrenda ? actualizarTipoPrenda(tipoPrenda.id, datos) : crearTipoPrenda(datos)
@@ -67,6 +68,17 @@ export default function TipoPrendaForm({
           required
         />
       </ClayField>
+      <ClayField label="Peso estandar (kg)">
+        <ClayInput
+          name="peso_estandar"
+          type="number"
+          min="0.01"
+          step="0.01"
+          defaultValue={tipoPrenda?.peso_estandar ?? ""}
+          placeholder="Prellena el peso al registrar la orden"
+        />
+      </ClayField>
+
       <div className="flex flex-wrap items-center gap-3 sm:col-span-2">
         <ClayButton type="submit" disabled={pending}>
           {pending ? "Guardando..." : editando ? "Guardar cambios" : "Agregar tipo de prenda"}

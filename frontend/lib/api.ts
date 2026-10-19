@@ -248,19 +248,25 @@ export async function getTrazabilidad(
 
 /* --------------------------- Catalogo de servicios y tarifas (HU07) --------------------------- */
 
-export type TipoPrenda = { id: number; nombre: string };
-export type Material = { id: number; nombre: string };
+export type TipoPrenda = { id: number; nombre: string; peso_estandar: string | null };
+export type NivelDificultad = { id: number; nombre: string; factor: string };
+export type Material = {
+  id: number;
+  nombre: string;
+  nivel_dificultad: number;
+  nivel_dificultad_nombre: string;
+  factor: string;
+};
 export type Servicio = { id: number; nombre: string; descripcion: string };
-export type UnidadCobro = "kilo" | "prenda";
-
+/** Sin tipo de prenda es la tarifa general del servicio; con tipo, una excepcion. */
 export type Tarifa = {
   id: number;
-  tipo_prenda: number;
-  tipo_prenda_nombre: string;
   servicio: number;
   servicio_nombre: string;
-  valor: string;
-  unidad_cobro: UnidadCobro;
+  tipo_prenda: number | null;
+  tipo_prenda_nombre: string | null;
+  valor_base: string;
+  precio_por_kilo: string;
   plazo_entrega_dias: number;
   vigente_desde: string;
   vigente_hasta: string | null;
@@ -270,6 +276,12 @@ export type TarifaFormulario = Omit<Tarifa, "id" | "tipo_prenda_nombre" | "servi
 
 export async function getTiposPrenda(cookieStore: CookieStore): Promise<TipoPrenda[] | null> {
   return fetchBackend<TipoPrenda[]>("/catalogo/tipos-prenda", cookieStore);
+}
+
+export async function getNivelesDificultad(
+  cookieStore: CookieStore,
+): Promise<NivelDificultad[] | null> {
+  return fetchBackend<NivelDificultad[]>("/catalogo/niveles-dificultad", cookieStore);
 }
 
 export async function getMateriales(cookieStore: CookieStore): Promise<Material[] | null> {
@@ -294,13 +306,26 @@ export async function crearTipoPrenda(datos: Omit<TipoPrenda, "id">): Promise<Re
   return api("/catalogo/tipos-prenda", { method: "POST", body: datos });
 }
 
-export async function crearMaterial(datos: Omit<Material, "id">): Promise<Response> {
+export async function crearNivelDificultad(datos: Omit<NivelDificultad, "id">): Promise<Response> {
+  return api("/catalogo/niveles-dificultad", { method: "POST", body: datos });
+}
+
+export async function actualizarNivelDificultad(
+  id: number,
+  datos: Partial<Omit<NivelDificultad, "id">>,
+): Promise<Response> {
+  return api(`/catalogo/niveles-dificultad/${id}`, { method: "PATCH", body: datos });
+}
+
+export type MaterialFormulario = { nombre: string; nivel_dificultad: number };
+
+export async function crearMaterial(datos: MaterialFormulario): Promise<Response> {
   return api("/catalogo/materiales", { method: "POST", body: datos });
 }
 
 export async function actualizarMaterial(
   id: number,
-  datos: Partial<Omit<Material, "id">>,
+  datos: Partial<MaterialFormulario>,
 ): Promise<Response> {
   return api(`/catalogo/materiales/${id}`, { method: "PATCH", body: datos });
 }
@@ -402,8 +427,13 @@ export type ServicioDePrenda = {
   id: number;
   servicio: number;
   servicio_nombre: string;
-  unidad_cobro: UnidadCobro;
   valor_aplicado: string;
+  valor_base: string | null;
+  precio_por_kilo: string | null;
+  peso: string | null;
+  nivel_dificultad: string;
+  factor: string | null;
+  es_excepcion: boolean | null;
 };
 
 export type PrendaDeOrden = {
@@ -451,7 +481,7 @@ export type PrendaFormulario = {
   tipo_prenda: number;
   material: number;
   cantidad: number;
-  peso: string | null;
+  peso: string;
   talla: string;
   genero: string;
   color: string;

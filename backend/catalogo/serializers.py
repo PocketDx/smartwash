@@ -1,8 +1,10 @@
+from decimal import Decimal
+
 from django.db import transaction
 from django.db.models import Q
 from rest_framework import serializers
 
-from .models import Material, Servicio, Tarifa, TipoPrenda
+from .models import Material, NivelDificultad, Servicio, Tarifa, TipoPrenda
 
 
 class ConAutoriaSerializer(serializers.ModelSerializer):
@@ -41,33 +43,57 @@ class ServicioSerializer(NombreUnicoMixin, ConAutoriaSerializer):
 
 
 class TipoPrendaSerializer(NombreUnicoMixin, ConAutoriaSerializer):
+    peso_estandar = serializers.DecimalField(
+        max_digits=5, decimal_places=2, min_value=Decimal("0.01"), required=False, allow_null=True
+    )
+
     class Meta:
         model = TipoPrenda
-        fields = ("id", "nombre")
+        fields = ("id", "nombre", "peso_estandar")
+
+
+class NivelDificultadSerializer(NombreUnicoMixin, ConAutoriaSerializer):
+    factor = serializers.DecimalField(max_digits=5, decimal_places=2, min_value=Decimal("0.01"))
+
+    class Meta:
+        model = NivelDificultad
+        fields = ("id", "nombre", "factor")
 
 
 class MaterialSerializer(NombreUnicoMixin, ConAutoriaSerializer):
+    nivel_dificultad = serializers.PrimaryKeyRelatedField(queryset=NivelDificultad.objects.all())
+    nivel_dificultad_nombre = serializers.CharField(source="nivel_dificultad.nombre", read_only=True)
+    factor = serializers.DecimalField(
+        source="nivel_dificultad.factor", max_digits=5, decimal_places=2, read_only=True
+    )
+
     class Meta:
         model = Material
-        fields = ("id", "nombre")
+        fields = ("id", "nombre", "nivel_dificultad", "nivel_dificultad_nombre", "factor")
 
 
 class TarifaSerializer(ConAutoriaSerializer):
-    tipo_prenda_nombre = serializers.CharField(source="tipo_prenda.nombre", read_only=True)
+    tipo_prenda = serializers.PrimaryKeyRelatedField(
+        queryset=TipoPrenda.objects.all(), required=False, allow_null=True, default=None
+    )
+    tipo_prenda_nombre = serializers.CharField(
+        source="tipo_prenda.nombre", read_only=True, allow_null=True
+    )
     servicio_nombre = serializers.CharField(source="servicio.nombre", read_only=True)
-    valor = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=0)
+    valor_base = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=0)
+    precio_por_kilo = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=0)
     plazo_entrega_dias = serializers.IntegerField(min_value=1)
 
     class Meta:
         model = Tarifa
         fields = (
             "id",
-            "tipo_prenda",
-            "tipo_prenda_nombre",
             "servicio",
             "servicio_nombre",
-            "valor",
-            "unidad_cobro",
+            "tipo_prenda",
+            "tipo_prenda_nombre",
+            "valor_base",
+            "precio_por_kilo",
             "plazo_entrega_dias",
             "vigente_desde",
             "vigente_hasta",
@@ -150,7 +176,7 @@ class TarifaSerializer(ConAutoriaSerializer):
             anterior = (
                 Tarifa.objects.select_for_update()
                 .filter(
-                    tipo_prenda=validated_data["tipo_prenda"],
+                    tipo_prenda=validated_data.get("tipo_prenda"),
                     servicio=validated_data["servicio"],
                     vigente_hasta__isnull=True,
                 )

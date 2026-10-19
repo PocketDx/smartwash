@@ -2,18 +2,24 @@ from django.contrib import admin
 
 from core.admin import AutoriaAdminMixin
 
-from .models import Material, Servicio, Tarifa, TipoPrenda
+from .models import Material, NivelDificultad, Servicio, Tarifa, TipoPrenda
 
 
 @admin.register(TipoPrenda)
 class TipoPrendaAdmin(AutoriaAdminMixin):
-    list_display = ("nombre",)
+    list_display = ("nombre", "peso_estandar")
     search_fields = ("nombre",)
+
+
+@admin.register(NivelDificultad)
+class NivelDificultadAdmin(AutoriaAdminMixin):
+    list_display = ("nombre", "factor")
 
 
 @admin.register(Material)
 class MaterialAdmin(AutoriaAdminMixin):
-    list_display = ("nombre",)
+    list_display = ("nombre", "nivel_dificultad")
+    list_filter = ("nivel_dificultad",)
     search_fields = ("nombre",)
 
 
@@ -26,9 +32,10 @@ class ServicioAdmin(AutoriaAdminMixin):
 @admin.register(Tarifa)
 class TarifaAdmin(AutoriaAdminMixin):
     list_display = (
-        "tipo_prenda",
         "servicio",
-        "valor",
+        "tipo_prenda",
+        "valor_base",
+        "precio_por_kilo",
         "plazo_entrega_dias",
         "vigente_desde",
         "vigente_hasta",
