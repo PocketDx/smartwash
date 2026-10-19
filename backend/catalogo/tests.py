@@ -3,10 +3,11 @@ from decimal import Decimal
 
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError
+from django.db.models import ProtectedError
 from django.test import TestCase
 from rest_framework.test import APITestCase
 
-from .models import Material, Servicio, Tarifa, TipoPrenda
+from .models import Material, NivelDificultad, Servicio, Tarifa, TipoPrenda
 
 User = get_user_model()
 
@@ -20,7 +21,8 @@ class TarifaTests(TestCase):
         return Tarifa.objects.create(
             tipo_prenda=extra.get("tipo_prenda", self.camisa),
             servicio=extra.get("servicio", self.lavado),
-            valor=Decimal(valor),
+            valor_base=Decimal(valor),
+            precio_por_kilo=Decimal("0"),
             plazo_entrega_dias=2,
             vigente_desde=desde,
             vigente_hasta=hasta,
@@ -52,7 +54,7 @@ class TarifaTests(TestCase):
     def test_el_valor_se_guarda_como_decimal_exacto(self):
         tarifa = self.crear_tarifa(valor="8500.55")
         tarifa.refresh_from_db()
-        self.assertEqual(tarifa.valor, Decimal("8500.55"))
+        self.assertEqual(tarifa.valor_base, Decimal("8500.55"))
 
 
 class CatalogoApiTests(APITestCase):
@@ -63,12 +65,14 @@ class CatalogoApiTests(APITestCase):
         self.client.login(username="admin", password="smartwash123")
         self.camisa = TipoPrenda.objects.create(nombre="Camisa")
         self.lavado = Servicio.objects.create(nombre="Lavado")
+        self.nivel = NivelDificultad.objects.create(nombre="Facil", factor=Decimal("1.00"))
 
     def datos_tarifa(self, **extra):
         datos = {
             "tipo_prenda": self.camisa.pk,
             "servicio": self.lavado.pk,
-            "valor": "8000.00",
+            "valor_base": "8000.00",
+            "precio_por_kilo": "0",
             "plazo_entrega_dias": 2,
             "vigente_desde": "2026-01-01",
         }
@@ -105,10 +109,12 @@ class CatalogoApiTests(APITestCase):
             "/api/catalogo/tipos-prenda", {"nombre": "Cobija"}
         )
         self.assertEqual(response.status_code, 201)
-        self.assertEqual(response.json(), {"id": TipoPrenda.objects.get(nombre="Cobija").pk, "nombre": "Cobija"})
+        self.assertEqual(response.json(), {"id": TipoPrenda.objects.get(nombre="Cobija").pk, "nombre": "Cobija", "peso_estandar": None})
 
     def test_crea_y_edita_un_material_con_autoria(self):
-        creado = self.client.post("/api/catalogo/materiales", {"nombre": "Lana"})
+        creado = self.client.post(
+            "/api/catalogo/materiales", {"nombre": "Lana", "nivel_dificultad": self.nivel.pk}
+        )
         self.assertEqual(creado.status_code, 201)
         material = Material.objects.get()
         self.assertEqual(material.creado_por, self.admin)
@@ -121,18 +127,18 @@ class CatalogoApiTests(APITestCase):
         self.assertEqual(material.nombre, "Seda")
 
     def test_rechaza_un_material_repetido_sin_importar_mayusculas(self):
-        Material.objects.create(nombre="Algodon")
+        Material.objects.create(nombre="Algodon", nivel_dificultad=self.nivel)
         response = self.client.post("/api/catalogo/materiales", {"nombre": " algodon "})
         self.assertEqual(response.status_code, 400)
         self.assertEqual(Material.objects.count(), 1)
 
     def test_cualquier_sesion_lista_materiales_y_solo_el_administrador_escribe(self):
-        Material.objects.create(nombre="Jean")
+        Material.objects.create(nombre="Jean", nivel_dificultad=self.nivel)
         for rol in (User.Rol.RECEPCIONISTA, User.Rol.OPERARIO):
             usuario = User.objects.create_user(username=f"u-{rol}", password="x", rol=rol)
             self.client.force_authenticate(usuario)
             self.assertEqual(self.client.get("/api/catalogo/materiales").status_code, 200)
-            self.assertEqual(self.client.post("/api/catalogo/materiales", {"nombre": "Lino"}).status_code, 403)
+            self.assertEqual(self.client.post("/api/catalogo/materiales", {"nombre": "Lino", "nivel_dificultad": self.nivel.pk}).status_code, 403)
             self.assertEqual(
                 self.client.post("/api/catalogo/tipos-prenda", {"nombre": "Saco"}).status_code, 403
             )
@@ -143,16 +149,16 @@ class CatalogoApiTests(APITestCase):
         self.assertEqual(response.status_code, 201)
         self.assertEqual(response.json()["servicio_nombre"], "Lavado")
         tarifa = Tarifa.objects.get()
-        self.assertEqual(tarifa.valor, Decimal("8000.00"))
+        self.assertEqual(tarifa.valor_base, Decimal("8000.00"))
         self.assertEqual(tarifa.creado_por, self.admin)
 
     def test_rechaza_una_tarifa_negativa(self):
-        response = self.client.post("/api/catalogo/tarifas", self.datos_tarifa(valor="-1"))
+        response = self.client.post("/api/catalogo/tarifas", self.datos_tarifa(valor_base="-1"))
         self.assertEqual(response.status_code, 400)
         self.assertFalse(Tarifa.objects.exists())
 
     def test_rechaza_una_tarifa_vacia(self):
-        response = self.client.post("/api/catalogo/tarifas", self.datos_tarifa(valor=""))
+        response = self.client.post("/api/catalogo/tarifas", self.datos_tarifa(valor_base=""))
         self.assertEqual(response.status_code, 400)
         self.assertFalse(Tarifa.objects.exists())
 
@@ -160,13 +166,13 @@ class CatalogoApiTests(APITestCase):
         self.client.post("/api/catalogo/tarifas", self.datos_tarifa())
         response = self.client.post(
             "/api/catalogo/tarifas",
-            self.datos_tarifa(valor="9000.00", vigente_desde="2026-06-01"),
+            self.datos_tarifa(valor_base="9000.00", vigente_desde="2026-06-01"),
         )
         self.assertEqual(response.status_code, 201)
-        anterior = Tarifa.objects.get(valor=Decimal("8000.00"))
+        anterior = Tarifa.objects.get(valor_base=Decimal("8000.00"))
         self.assertEqual(anterior.vigente_hasta, date(2026, 6, 1))
         vigentes = self.client.get("/api/catalogo/tarifas?vigentes=1").json()
-        self.assertEqual([t["valor"] for t in vigentes], ["9000.00"])
+        self.assertEqual([t["valor_base"] for t in vigentes], ["9000.00"])
 
     def test_una_tarifa_nueva_no_puede_empezar_antes_que_la_vigente(self):
         self.client.post("/api/catalogo/tarifas", self.datos_tarifa(vigente_desde="2026-06-01"))
@@ -246,7 +252,8 @@ class CatalogoApiTests(APITestCase):
         Tarifa.objects.create(
             tipo_prenda=self.camisa,
             servicio=self.lavado,
-            valor=Decimal("7000"),
+            valor_base=Decimal("7000"),
+            precio_por_kilo=Decimal("0"),
             plazo_entrega_dias=2,
             vigente_desde=date(2026, 7, 1),
             vigente_hasta=date(2026, 8, 1),
@@ -254,7 +261,8 @@ class CatalogoApiTests(APITestCase):
         Tarifa.objects.create(
             tipo_prenda=self.camisa,
             servicio=self.lavado,
-            valor=Decimal("8000"),
+            valor_base=Decimal("8000"),
+            precio_por_kilo=Decimal("0"),
             plazo_entrega_dias=2,
             vigente_desde=date(2026, 6, 1),
         )
@@ -271,7 +279,7 @@ class CatalogoApiTests(APITestCase):
         ).json()["id"]
         response = self.client.patch(
             f"/api/catalogo/tarifas/{tarifa_id}",
-            {"valor": "8500.00", "vigente_hasta": "2026-04-01"},
+            {"valor_base": "8500.00", "vigente_hasta": "2026-04-01"},
             content_type="application/json",
         )
         self.assertEqual(response.status_code, 200)
@@ -317,12 +325,12 @@ class CatalogoApiTests(APITestCase):
         tarifa_id = self.client.post("/api/catalogo/tarifas", self.datos_tarifa()).json()["id"]
         response = self.client.patch(
             f"/api/catalogo/tarifas/{tarifa_id}",
-            {"valor": "9500.00", "plazo_entrega_dias": 0},
+            {"valor_base": "9500.00", "plazo_entrega_dias": 0},
             content_type="application/json",
         )
         self.assertEqual(response.status_code, 400)
         tarifa = Tarifa.objects.get(pk=tarifa_id)
-        self.assertEqual(tarifa.valor, Decimal("8000.00"))
+        self.assertEqual(tarifa.valor_base, Decimal("8000.00"))
         self.assertEqual(tarifa.plazo_entrega_dias, 2)
 
     def test_requiere_sesion_activa(self):
@@ -331,35 +339,137 @@ class CatalogoApiTests(APITestCase):
         self.assertEqual(response.status_code, 403)
         self.assertFalse(Servicio.objects.filter(nombre="Planchado").exists())
 
-    def test_la_tarifa_se_cobra_por_kilo_si_no_se_indica_la_unidad(self):
-        response = self.client.post("/api/catalogo/tarifas", self.datos_tarifa())
-        self.assertEqual(response.status_code, 201)
-        self.assertEqual(response.json()["unidad_cobro"], "kilo")
+    def test_una_tarifa_general_no_lleva_tipo_de_prenda(self):
+        datos = self.datos_tarifa(precio_por_kilo="8000", valor_base="5000")
+        del datos["tipo_prenda"]
+        response = self.client.post("/api/catalogo/tarifas", datos)
+        self.assertEqual(response.status_code, 201, response.json())
+        self.assertIsNone(response.json()["tipo_prenda"])
+        self.assertIsNone(response.json()["tipo_prenda_nombre"])
 
-    def test_crea_una_tarifa_por_prenda(self):
-        response = self.client.post(
-            "/api/catalogo/tarifas", self.datos_tarifa(unidad_cobro="prenda")
-        )
-        self.assertEqual(response.status_code, 201)
-        self.assertEqual(Tarifa.objects.get().unidad_cobro, Tarifa.UnidadCobro.PRENDA)
+    def test_solo_hay_una_tarifa_general_vigente_por_servicio_y_la_nueva_cierra_la_anterior(self):
+        datos = self.datos_tarifa()
+        del datos["tipo_prenda"]
+        self.client.post("/api/catalogo/tarifas", datos)
+        datos.update(valor_base="9000", vigente_desde="2026-06-01")
+        self.assertEqual(self.client.post("/api/catalogo/tarifas", datos).status_code, 201)
+        generales = Tarifa.objects.filter(tipo_prenda__isnull=True, vigente_hasta__isnull=True)
+        self.assertEqual([t.valor_base for t in generales], [Decimal("9000.00")])
 
-    def test_rechaza_una_unidad_de_cobro_desconocida(self):
-        response = self.client.post(
-            "/api/catalogo/tarifas", self.datos_tarifa(unidad_cobro="metro")
+    def test_la_base_de_datos_rechaza_dos_generales_vigentes_del_mismo_servicio(self):
+        Tarifa.objects.create(
+            servicio=self.lavado, valor_base=1, precio_por_kilo=1, plazo_entrega_dias=1, vigente_desde=date(2026, 1, 1)
         )
+        with self.assertRaises(IntegrityError):
+            Tarifa.objects.create(
+                servicio=self.lavado, valor_base=2, precio_por_kilo=2, plazo_entrega_dias=1, vigente_desde=date(2026, 2, 1)
+            )
+
+    def test_rechaza_un_precio_por_kilo_negativo(self):
+        response = self.client.post("/api/catalogo/tarifas", self.datos_tarifa(precio_por_kilo="-1"))
         self.assertEqual(response.status_code, 400)
-        self.assertIn("unidad_cobro", response.json())
-        self.assertFalse(Tarifa.objects.exists())
+        self.assertIn("precio_por_kilo", response.json())
 
-    def test_cambia_la_unidad_de_cobro_de_una_tarifa_existente(self):
-        tarifa_id = self.client.post("/api/catalogo/tarifas", self.datos_tarifa()).json()["id"]
+    def test_edita_el_precio_por_kilo_de_la_tarifa_vigente(self):
+        tarifa_id = self.client.post(
+            "/api/catalogo/tarifas", self.datos_tarifa(precio_por_kilo="8000")
+        ).json()["id"]
         response = self.client.patch(
-            f"/api/catalogo/tarifas/{tarifa_id}",
-            {"unidad_cobro": "prenda"},
-            format="json",
+            f"/api/catalogo/tarifas/{tarifa_id}", {"precio_por_kilo": "9000"}, format="json"
         )
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(Tarifa.objects.get(pk=tarifa_id).unidad_cobro, "prenda")
+        self.assertEqual(Tarifa.objects.get(pk=tarifa_id).precio_por_kilo, Decimal("9000.00"))
+
+
+class NivelDificultadYMaterialTests(APITestCase):
+    def setUp(self):
+        self.admin = User.objects.create_user(username="admin", password="x", rol=User.Rol.ADMINISTRADOR)
+        self.client.force_authenticate(self.admin)
+        self.facil = NivelDificultad.objects.create(nombre="Facil", factor=Decimal("1.00"))
+
+    def test_crea_edita_y_renombra_un_nivel(self):
+        creado = self.client.post("/api/catalogo/niveles-dificultad", {"nombre": "Experto", "factor": "1.30"})
+        self.assertEqual(creado.status_code, 201, creado.json())
+        nivel_id = creado.json()["id"]
+        editado = self.client.patch(
+            f"/api/catalogo/niveles-dificultad/{nivel_id}",
+            {"nombre": "Intermedio", "factor": "1.40"},
+            format="json",
+        )
+        self.assertEqual(editado.status_code, 200)
+        nivel = NivelDificultad.objects.get(pk=nivel_id)
+        self.assertEqual((nivel.nombre, nivel.factor, nivel.creado_por), ("Intermedio", Decimal("1.40"), self.admin))
+
+    def test_el_factor_debe_ser_mayor_que_cero(self):
+        antes = NivelDificultad.objects.count()
+        for factor in ("0", "-1", "0.00", ""):
+            with self.subTest(factor=factor):
+                response = self.client.post(
+                    "/api/catalogo/niveles-dificultad", {"nombre": f"N{factor}", "factor": factor}
+                )
+                self.assertEqual(response.status_code, 400)
+        self.assertEqual(NivelDificultad.objects.count(), antes)
+
+    def test_rechaza_un_nivel_repetido_sin_importar_mayusculas(self):
+        response = self.client.post("/api/catalogo/niveles-dificultad", {"nombre": "FACIL", "factor": "2"})
+        self.assertEqual(response.status_code, 400)
+
+    def test_el_material_exige_nivel_y_muestra_su_factor(self):
+        sin_nivel = self.client.post("/api/catalogo/materiales", {"nombre": "Lino"})
+        self.assertEqual(sin_nivel.status_code, 400)
+        self.assertIn("nivel_dificultad", sin_nivel.json())
+
+        response = self.client.post(
+            "/api/catalogo/materiales", {"nombre": "Lino", "nivel_dificultad": self.facil.pk}
+        )
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json()["nivel_dificultad_nombre"], "Facil")
+        self.assertEqual(response.json()["factor"], "1.00")
+
+    def test_cambiar_el_factor_del_nivel_cambia_el_factor_de_sus_materiales(self):
+        Material.objects.create(nombre="Jean", nivel_dificultad=self.facil)
+        self.client.patch(
+            f"/api/catalogo/niveles-dificultad/{self.facil.pk}", {"factor": "1.10"}, format="json"
+        )
+        self.assertEqual(self.client.get("/api/catalogo/materiales").json()[0]["factor"], "1.10")
+
+    def test_un_nivel_con_materiales_no_se_puede_eliminar(self):
+        Material.objects.create(nombre="Jean", nivel_dificultad=self.facil)
+        response = self.client.delete(f"/api/catalogo/niveles-dificultad/{self.facil.pk}")
+        self.assertEqual(response.status_code, 400)
+        self.assertTrue(NivelDificultad.objects.filter(pk=self.facil.pk).exists())
+        with self.assertRaises(ProtectedError):
+            self.facil.delete()
+
+    def test_un_nivel_sin_materiales_se_elimina(self):
+        self.assertEqual(self.client.delete(f"/api/catalogo/niveles-dificultad/{self.facil.pk}").status_code, 204)
+
+    def test_el_tipo_de_prenda_guarda_su_peso_estandar_y_lo_exige_positivo(self):
+        creado = self.client.post("/api/catalogo/tipos-prenda", {"nombre": "Cobija", "peso_estandar": "2.5"})
+        self.assertEqual(creado.status_code, 201)
+        self.assertEqual(creado.json()["peso_estandar"], "2.50")
+        malo = self.client.post("/api/catalogo/tipos-prenda", {"nombre": "Saco", "peso_estandar": "0"})
+        self.assertEqual(malo.status_code, 400)
+        sin_peso = self.client.post("/api/catalogo/tipos-prenda", {"nombre": "Falda"})
+        self.assertEqual(sin_peso.status_code, 201)
+        self.assertIsNone(sin_peso.json()["peso_estandar"])
+
+    def test_recepcion_y_operario_no_escriben_niveles_pero_si_los_consultan(self):
+        for rol in (User.Rol.RECEPCIONISTA, User.Rol.OPERARIO):
+            self.client.force_authenticate(User.objects.create_user(username=f"u-{rol}", password="x", rol=rol))
+            self.assertEqual(self.client.get("/api/catalogo/niveles-dificultad").status_code, 200)
+            self.assertEqual(
+                self.client.post("/api/catalogo/niveles-dificultad", {"nombre": "X", "factor": "2"}).status_code, 403
+            )
+            self.assertEqual(
+                self.client.patch(
+                    f"/api/catalogo/niveles-dificultad/{self.facil.pk}", {"factor": "9"}, format="json"
+                ).status_code,
+                403,
+            )
+            self.assertEqual(self.client.delete(f"/api/catalogo/niveles-dificultad/{self.facil.pk}").status_code, 403)
+        self.facil.refresh_from_db()
+        self.assertEqual(self.facil.factor, Decimal("1.00"))
 
 
 class CatalogoPermisosTests(APITestCase):
@@ -375,7 +485,8 @@ class CatalogoPermisosTests(APITestCase):
         self.tarifa = Tarifa.objects.create(
             tipo_prenda=self.camisa,
             servicio=self.lavado,
-            valor="8000.00",
+            valor_base="8000.00",
+            precio_por_kilo="0",
             plazo_entrega_dias=2,
             vigente_desde="2026-01-01",
         )
@@ -394,7 +505,8 @@ class CatalogoPermisosTests(APITestCase):
             "tarifas": {
                 "tipo_prenda": self.camisa.pk,
                 "servicio": self.lavado.pk,
-                "valor": "9000.00",
+                "valor_base": "9000.00",
+                "precio_por_kilo": "0",
                 "plazo_entrega_dias": 2,
                 "vigente_desde": "2026-06-01",
             },
@@ -410,7 +522,7 @@ class CatalogoPermisosTests(APITestCase):
         ediciones = {
             f"tipos-prenda/{self.camisa.pk}": {"nombre": "Otra"},
             f"servicios/{self.lavado.pk}": {"nombre": "Otro"},
-            f"tarifas/{self.tarifa.pk}": {"valor": "1.00"},
+            f"tarifas/{self.tarifa.pk}": {"valor_base": "1.00"},
         }
         for ruta, datos in ediciones.items():
             with self.subTest(ruta=ruta):
@@ -418,7 +530,7 @@ class CatalogoPermisosTests(APITestCase):
                     self.client.patch(f"/api/catalogo/{ruta}", datos, format="json").status_code, 403
                 )
         self.tarifa.refresh_from_db()
-        self.assertEqual(self.tarifa.valor, Decimal("8000.00"))
+        self.assertEqual(self.tarifa.valor_base, Decimal("8000.00"))
 
     def test_el_administrador_si_escribe_en_el_catalogo(self):
         self.client.login(username="admin", password="smartwash123")

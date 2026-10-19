@@ -68,7 +68,7 @@ export default function AgregarServicio({
             return (
               <option key={s.id} value={s.id}>
                 {s.nombre}
-                {tarifa ? ` · ${formatCOP(tarifa.valor)} por ${tarifa.unidad_cobro}` : ""}
+                {tarifa ? ` · ${formatCOP(tarifa.valor_base)} + ${formatCOP(tarifa.precio_por_kilo)}/kg` : ""}
               </option>
             );
           })}

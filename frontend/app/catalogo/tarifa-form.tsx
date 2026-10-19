@@ -11,8 +11,8 @@ import { AlertaErrores, mensajesDeError } from "./errores";
 export const ETIQUETAS_TARIFA = {
   tipo_prenda: "Tipo de prenda",
   servicio: "Servicio",
-  valor: "Valor",
-  unidad_cobro: "Unidad de cobro",
+  valor_base: "Valor base por prenda",
+  precio_por_kilo: "Precio por kilo",
   plazo_entrega_dias: "Plazo de entrega",
   vigente_desde: "Vigente desde",
   vigente_hasta: "Vigente hasta",
@@ -21,10 +21,12 @@ export const ETIQUETAS_TARIFA = {
 export default function TarifaForm({
   tiposPrenda,
   servicios,
+  general,
   className,
 }: {
   tiposPrenda: TipoPrenda[];
   servicios: Servicio[];
+  general: boolean;
   className?: string;
 }) {
   const router = useRouter();
@@ -42,10 +44,10 @@ export default function TarifaForm({
 
     const form = new FormData(formulario);
     const response = await crearTarifa({
-      tipo_prenda: Number(form.get("tipo_prenda")),
+      tipo_prenda: general ? null : Number(form.get("tipo_prenda")),
       servicio: Number(form.get("servicio")),
-      valor: String(form.get("valor") ?? "0"),
-      unidad_cobro: form.get("unidad_cobro") === "prenda" ? "prenda" : "kilo",
+      valor_base: String(form.get("valor_base") ?? "0"),
+      precio_por_kilo: String(form.get("precio_por_kilo") ?? "0"),
       plazo_entrega_dias: Number(form.get("plazo_entrega_dias") ?? 1),
       vigente_desde: String(form.get("vigente_desde") ?? ""),
       vigente_hasta: null,
@@ -61,25 +63,27 @@ export default function TarifaForm({
     setErrores(await mensajesDeError(response, ETIQUETAS_TARIFA, "No se pudo crear la tarifa"));
   }
 
-  if (tiposPrenda.length === 0 || servicios.length === 0) {
+  if ((!general && tiposPrenda.length === 0) || servicios.length === 0) {
     return (
       <p className="text-sm text-(--sw-ink-soft)">
-        Para crear una tarifa primero registra al menos un tipo de prenda y un servicio.
+        Para crear una tarifa primero registra al menos un servicio (y un tipo de prenda para una excepcion).
       </p>
     );
   }
 
   return (
     <form onSubmit={onSubmit} className={cx("grid grid-cols-1 gap-4 sm:grid-cols-2", className)}>
-      <ClayField label="Tipo de prenda">
-        <ClaySelect name="tipo_prenda" required>
-          {tiposPrenda.map((tipo) => (
-            <option key={tipo.id} value={tipo.id}>
-              {tipo.nombre}
-            </option>
-          ))}
-        </ClaySelect>
-      </ClayField>
+      {!general && (
+        <ClayField label="Tipo de prenda">
+          <ClaySelect name="tipo_prenda" required>
+            {tiposPrenda.map((tipo) => (
+              <option key={tipo.id} value={tipo.id}>
+                {tipo.nombre}
+              </option>
+            ))}
+          </ClaySelect>
+        </ClayField>
+      )}
       <ClayField label="Servicio">
         <ClaySelect name="servicio" required>
           {servicios.map((servicio) => (
@@ -89,14 +93,11 @@ export default function TarifaForm({
           ))}
         </ClaySelect>
       </ClayField>
-      <ClayField label="Valor (COP)">
-        <ClayInput name="valor" type="number" min="0" step="0.01" required />
+      <ClayField label="Valor base por prenda (COP)">
+        <ClayInput name="valor_base" type="number" min="0" step="0.01" defaultValue="0" required />
       </ClayField>
-      <ClayField label="Unidad de cobro">
-        <ClaySelect name="unidad_cobro" defaultValue="kilo" required>
-          <option value="kilo">Por kilo</option>
-          <option value="prenda">Por prenda</option>
-        </ClaySelect>
+      <ClayField label="Precio por kilo (COP)">
+        <ClayInput name="precio_por_kilo" type="number" min="0" step="0.01" defaultValue="0" required />
       </ClayField>
       <ClayField label="Plazo de entrega (dias)">
         <ClayInput name="plazo_entrega_dias" type="number" min="1" required />

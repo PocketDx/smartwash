@@ -3,6 +3,8 @@ from django.urls import path
 from .views import (
     MaterialDetailView,
     MaterialListCreateView,
+    NivelDificultadDetailView,
+    NivelDificultadListCreateView,
     ServicioDetailView,
     ServicioListCreateView,
     TarifaDetailView,
@@ -17,6 +19,12 @@ urlpatterns = [
     path("tipos-prenda", TipoPrendaListCreateView.as_view(), name="tipos-prenda"),
     path(
         "tipos-prenda/<int:pk>", TipoPrendaDetailView.as_view(), name="tipo-prenda-detalle"
+    ),
+    path("niveles-dificultad", NivelDificultadListCreateView.as_view(), name="niveles-dificultad"),
+    path(
+        "niveles-dificultad/<int:pk>",
+        NivelDificultadDetailView.as_view(),
+        name="nivel-dificultad-detalle",
     ),
     path("materiales", MaterialListCreateView.as_view(), name="materiales"),
     path("materiales/<int:pk>", MaterialDetailView.as_view(), name="material-detalle"),
