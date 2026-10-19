@@ -71,13 +71,14 @@ nucleo (T2); el resto de tablas del modelo entra con su historia.
 | Modelo | App | Notas |
 |--------|-----|-------|
 | `Cliente` | clientes | `documento` unico. `clasificacion` la actualiza RF38 |
-| `TipoPrenda` | catalogo | Solo el nombre: camisa, pantalon, cobija. La tarifa depende de esto, no del material |
-| `Material` | catalogo | Solo el nombre: algodon, jean, lana. Lista independiente del tipo |
+| `TipoPrenda` | catalogo | Nombre (camisa, pantalon, cobija) y `peso_estandar` opcional, que prellena el peso de la prenda |
+| `NivelDificultad` | catalogo | Nombre y `factor` > 0, editables por el administrador (Facil 1.00, Medio 1.30, Dificil 1.60 de ejemplo). Un nivel con materiales no se elimina |
+| `Material` | catalogo | Nombre y `nivel_dificultad` (obligatorio): el factor del nivel multiplica el precio |
 | `Servicio` | catalogo | Lavado, planchado, lavado en seco |
-| `Tarifa` | catalogo | Por `(tipo_prenda, servicio)`, con vigencia. Una sola vigente por par |
+| `Tarifa` | catalogo | Por servicio: `valor_base` (por prenda) y `precio_por_kilo`, con vigencia y plazo. Sin `tipo_prenda` es la general del servicio; con tipo, una excepcion que tiene prioridad. Una general vigente por servicio y una excepcion vigente por `(servicio, tipo_prenda)` |
 | `Orden` | ordenes | `codigo` unico y publico. `operario` es nulo hasta HU10 |
 | `Prenda` | ordenes | Pertenece a una orden; tiene un `TipoPrenda` y un `Material` (obligatorio en la API, nulo en la base por las prendas anteriores) |
-| `OrdenServicio` | ordenes | Que servicios recibe cada prenda, con `valor_aplicado` congelado |
+| `OrdenServicio` | ordenes | Que servicios recibe cada prenda, con `valor_aplicado` congelado y su desglose (base, precio por kilo, peso, nivel, factor, si fue excepcion) |
 | `Pago` | pagos | Inmutable. `Orden.total_pagado()`, `tiene_abono()` y `pago_completo()` son la unica fuente del estado financiero |
 
 Cada prenda lleva su propia lista de servicios (la API acepta una distinta por
@@ -96,9 +97,15 @@ Reglas que valen para todo el dominio:
 
 - **El dinero va en `DecimalField`, nunca en `FloatField`.** Un float redondea y
   el total de una orden queda mal.
-- **Los precios no se releen, se congelan.** `OrdenServicio.valor_aplicado` copia
-  el valor de la tarifa al registrar la orden. Si manana sube el precio, lo ya
-  cobrado no cambia.
+- **Los precios no se releen, se congelan.** `OrdenServicio.valor_aplicado` guarda
+  el precio calculado al registrar la orden, junto con el desglose. Si manana
+  sube una tarifa o un factor, lo ya cobrado no cambia.
+- **Formula de precio**, por servicio de cada prenda:
+  `redondear_a_100((valor_base + peso_kg * precio_por_kilo) * factor_del_nivel_del_material)`.
+  El peso es el de UNA prenda y el cobro de la linea es ese precio por la
+  cantidad. El peso es obligatorio (> 0) en toda prenda nueva; una prenda sin
+  material (datos anteriores) usa factor 1. El descuento de fidelizacion y el
+  abono se calculan sobre los totales ya redondeados.
 - Las reglas de integridad se declaran como `constraints` en el modelo, no solo
   en el serializer: dos peticiones simultaneas se saltan una validacion que solo
   vive en Python.

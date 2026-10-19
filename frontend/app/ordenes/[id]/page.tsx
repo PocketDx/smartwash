@@ -180,7 +180,13 @@ export default async function OrdenPage({
                   <li key={s.id} className="flex justify-between gap-4">
                     <span className="text-(--sw-ink)">
                       {s.servicio_nombre}{" "}
-                      <span className="text-xs text-(--sw-ink-soft)">(por {s.unidad_cobro})</span>
+                      {puedeEditar && s.valor_base !== null && s.precio_por_kilo !== null && (
+                        <span className="text-xs text-(--sw-ink-soft)">
+                          ({formatCOP(s.valor_base)} + {Number(s.peso)} kg × {formatCOP(s.precio_por_kilo)}
+                          {s.nivel_dificultad ? ` · ${s.nivel_dificultad} ×${Number(s.factor)}` : ""}
+                          {s.es_excepcion ? " · tarifa del tipo" : ""})
+                        </span>
+                      )}
                     </span>
                     <span className="font-semibold text-(--sw-ink) tabular-nums">
                       {formatCOP(

@@ -30,7 +30,7 @@ export default function OrdenForm({
   const [errores, setErrores] = useState<string[]>([]);
   const [pending, setPending] = useState(false);
 
-  const subtotal = lineas.reduce((total, linea) => total + subtotalEstimado(linea, tarifas), 0);
+  const subtotal = lineas.reduce((total, linea) => total + subtotalEstimado(linea, tarifas, materiales), 0);
 
   function actualizarLinea(clave: number, linea: LineaEditable) {
     setLineas((actuales) => actuales.map((l) => (l.clave === clave ? linea : l)));
@@ -107,7 +107,7 @@ export default function OrdenForm({
           <span className="text-lg font-bold text-(--sw-ink) tabular-nums">{formatCOP(subtotal)}</span>
         </p>
         <p className="mt-1 text-xs text-(--sw-ink-soft)">
-          Al registrar, el sistema aplica el descuento de fidelizacion que corresponda y calcula el
+          El precio de cada servicio depende del peso y del material de la prenda. Al registrar, el sistema aplica el descuento de fidelizacion que corresponda y calcula el
           total, el abono requerido (30 %) y la duracion estimada. La orden queda &quot;En espera&quot;
           hasta que se registre el abono.
         </p>

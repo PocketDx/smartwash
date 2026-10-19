@@ -245,7 +245,7 @@ class Prenda(ModeloConAutoria):
         decimal_places=2,
         null=True,
         blank=True,
-        help_text="Kilos de la linea. Obligatorio si algun servicio se cobra por kilo.",
+        help_text="Kilos de UNA prenda. La API lo exige; es nulo solo en prendas anteriores.",
     )
     talla = models.CharField(max_length=20, blank=True)
     genero = models.CharField(max_length=20, blank=True)
@@ -276,9 +276,17 @@ class OrdenServicio(ModeloConAutoria):
     tarifa = models.ForeignKey(
         Tarifa, on_delete=models.PROTECT, related_name="ordenes_servicio"
     )
-    # Lo cobrado por esta linea (tarifa x kilos o x prendas), congelado al
-    # registrarla: si la tarifa cambia despues, la orden conserva su valor.
+    # Lo cobrado por esta linea (precio de una prenda x cantidad), congelado al
+    # registrarla: si la tarifa o el factor cambian despues, la orden conserva
+    # su valor. El desglose permite auditar el calculo; es nulo en las lineas
+    # anteriores a que existiera.
     valor_aplicado = models.DecimalField(max_digits=10, decimal_places=2)
+    valor_base = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    precio_por_kilo = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    peso = models.DecimalField(max_digits=7, decimal_places=2, null=True, blank=True)
+    nivel_dificultad = models.CharField(max_length=80, blank=True)
+    factor = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    es_excepcion = models.BooleanField(null=True, blank=True)
 
     class Meta:
         verbose_name = "servicio de la prenda"

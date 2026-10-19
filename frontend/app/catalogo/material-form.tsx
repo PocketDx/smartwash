@@ -3,19 +3,21 @@
 import { useRouter } from "next/navigation";
 import { useState, type FormEvent } from "react";
 
-import { actualizarMaterial, crearMaterial, type Material } from "@/lib/api";
+import { actualizarMaterial, crearMaterial, type Material, type NivelDificultad } from "@/lib/api";
 import { cx } from "@/lib/cx";
-import { ClayButton, ClayField, ClayInput } from "../components/ui/clay";
+import { ClayButton, ClayField, ClayInput, ClaySelect } from "../components/ui/clay";
 import { AlertaErrores, mensajesDeError } from "./errores";
 
-const ETIQUETAS = { nombre: "Nombre" };
+const ETIQUETAS = { nombre: "Nombre", nivel_dificultad: "Nivel de dificultad" };
 
 export default function MaterialForm({
   material,
+  niveles,
   onTerminar,
   className,
 }: {
   material?: Material;
+  niveles: NivelDificultad[];
   onTerminar?: () => void;
   className?: string;
 }) {
@@ -37,6 +39,7 @@ export default function MaterialForm({
     const form = new FormData(formulario);
     const datos = {
       nombre: String(form.get("nombre") ?? "").trim(),
+      nivel_dificultad: Number(form.get("nivel_dificultad")),
     };
     const response = await (
       material ? actualizarMaterial(material.id, datos) : crearMaterial(datos)
@@ -66,6 +69,16 @@ export default function MaterialForm({
           maxLength={80}
           required
         />
+      </ClayField>
+      <ClayField label="Nivel de dificultad">
+        <ClaySelect name="nivel_dificultad" defaultValue={material?.nivel_dificultad ?? ""} required>
+          <option value="">Selecciona...</option>
+          {niveles.map((n) => (
+            <option key={n.id} value={n.id}>
+              {n.nombre} (x{Number(n.factor)})
+            </option>
+          ))}
+        </ClaySelect>
       </ClayField>
       <div className="flex flex-wrap items-center gap-3 sm:col-span-2">
         <ClayButton type="submit" disabled={pending}>

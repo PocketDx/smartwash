@@ -1,10 +1,12 @@
-from rest_framework import generics
+from django.db.models import ProtectedError
+from rest_framework import generics, serializers
 
 from core.permissions import SoloAdministradorEscribe
 
-from .models import Material, Servicio, Tarifa, TipoPrenda
+from .models import Material, NivelDificultad, Servicio, Tarifa, TipoPrenda
 from .serializers import (
     MaterialSerializer,
+    NivelDificultadSerializer,
     ServicioSerializer,
     TarifaSerializer,
     TipoPrendaSerializer,
@@ -35,15 +37,35 @@ class TipoPrendaDetailView(generics.RetrieveUpdateAPIView):
     serializer_class = TipoPrendaSerializer
 
 
+class NivelDificultadListCreateView(generics.ListCreateAPIView):
+    permission_classes = [SoloAdministradorEscribe]
+    queryset = NivelDificultad.objects.all()
+    serializer_class = NivelDificultadSerializer
+
+
+class NivelDificultadDetailView(generics.RetrieveUpdateDestroyAPIView):
+    permission_classes = [SoloAdministradorEscribe]
+    queryset = NivelDificultad.objects.all()
+    serializer_class = NivelDificultadSerializer
+
+    def perform_destroy(self, instance):
+        try:
+            instance.delete()
+        except ProtectedError:
+            raise serializers.ValidationError(
+                "El nivel tiene materiales asignados: reasignalos antes de eliminarlo."
+            )
+
+
 class MaterialListCreateView(generics.ListCreateAPIView):
     permission_classes = [SoloAdministradorEscribe]
-    queryset = Material.objects.all()
+    queryset = Material.objects.select_related("nivel_dificultad")
     serializer_class = MaterialSerializer
 
 
 class MaterialDetailView(generics.RetrieveUpdateAPIView):
     permission_classes = [SoloAdministradorEscribe]
-    queryset = Material.objects.all()
+    queryset = Material.objects.select_related("nivel_dificultad")
     serializer_class = MaterialSerializer
 
 

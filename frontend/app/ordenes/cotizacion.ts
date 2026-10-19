@@ -1,4 +1,4 @@
-import type { PrendaFormulario, Tarifa, TipoPrenda } from "@/lib/api";
+import type { Material, PrendaFormulario, Tarifa, TipoPrenda } from "@/lib/api";
 import { DIA_ISO } from "@/lib/auditoria";
 
 export const TALLAS = ["XXS", "XS", "S", "M", "L", "XL", "XXL", "3XL", "4XL", "Única"] as const;
@@ -93,32 +93,54 @@ export function tarifasDeHoy(tarifas: Tarifa[]): Tarifa[] {
   );
 }
 
-export function tarifaDe(tarifas: Tarifa[], tipoPrenda: number, servicio: number) {
-  return tarifas.find((t) => t.tipo_prenda === tipoPrenda && t.servicio === servicio);
+/** La excepcion vigente del tipo de prenda y, si no hay, la general del servicio. */
+export function tarifaDe(tarifas: Tarifa[], tipoPrenda: number, servicio: number): Tarifa | undefined {
+  const delServicio = tarifas.filter((t) => t.servicio === servicio);
+  return delServicio.find((t) => t.tipo_prenda === tipoPrenda) ?? delServicio.find((t) => t.tipo_prenda === null);
 }
 
-export function cobraPorKilo(tipoPrenda: string, servicios: number[], tarifas: Tarifa[]): boolean {
-  const tipo = Number(tipoPrenda);
-  return servicios.some((s) => tarifaDe(tarifas, tipo, s)?.unidad_cobro === "kilo");
+/** (base + peso x precio por kilo) x factor, a la centena mas cercana. Todo en enteros
+ * (centavos, centesimas de kilo y de factor) para que el medio suba igual que en Decimal. */
+export function precioUnitario(base: string, porKilo: string, peso: string, factor: string): number {
+  const bruto = Math.round(Number(base) * 100) * 100 + Math.round(Number(peso) * 100) * Math.round(Number(porKilo) * 100);
+  return Math.floor((bruto * Math.round(Number(factor) * 100) + 5e7) / 1e8) * 100;
 }
 
-function datosPorUnidad(linea: LineaEditable): DatosPrenda[] {
+export type LineaCotizada = {
+  servicio: number;
+  tarifa: Tarifa | null;
+  precio: number;
+  peso: number;
+  nivel: string;
+  factor: string;
+};
+
+export function cotizarUnidad(
+  tipoPrenda: string,
+  datos: DatosPrenda,
+  tarifas: Tarifa[],
+  materiales: Material[],
+): LineaCotizada[] {
+  const material = materiales.find((m) => m.id === Number(datos.material));
+  const factor = material?.factor ?? "1";
+  return datos.servicios.map((servicio) => {
+    const tarifa = tarifaDe(tarifas, Number(tipoPrenda), servicio) ?? null;
+    const precio = tarifa ? precioUnitario(tarifa.valor_base, tarifa.precio_por_kilo, datos.peso || "0", factor) : 0;
+    return { servicio, tarifa, precio, peso: Number(datos.peso) || 0, nivel: material?.nivel_dificultad_nombre ?? "", factor: String(Number(factor)) };
+  });
+}
+
+export function datosPorUnidad(linea: LineaEditable): DatosPrenda[] {
   return linea.detallar ? ajustarUnidades(linea) : Array.from({ length: unidadesDeCantidad(linea) }, () => linea);
 }
 
-function subtotalDeUnidad(tipoPrenda: string, datos: DatosPrenda, tarifas: Tarifa[]): number {
-  const tipo = Number(tipoPrenda);
-  return datos.servicios.reduce((total, servicio) => {
-    const tarifa = tarifaDe(tarifas, tipo, servicio);
-    if (!tarifa) return total;
-    return total + Number(tarifa.valor) * (tarifa.unidad_cobro === "kilo" ? Number(datos.peso) || 0 : 1);
-  }, 0);
-}
-
-/** Subtotal del bloque antes de descuentos: la suma de cada prenda segun sus
- * servicios. Es una vista previa; el valor que cuenta lo congela el backend. */
-export function subtotalEstimado(linea: LineaEditable, tarifas: Tarifa[]): number {
-  return datosPorUnidad(linea).reduce((suma, d) => suma + subtotalDeUnidad(linea.tipo_prenda, d, tarifas), 0);
+/** Subtotal del bloque antes de descuentos: la suma de cada prenda segun su peso,
+ * material y servicios. Es una vista previa; el valor que cuenta lo congela el backend. */
+export function subtotalEstimado(linea: LineaEditable, tarifas: Tarifa[], materiales: Material[]): number {
+  return datosPorUnidad(linea).reduce(
+    (suma, d) => suma + cotizarUnidad(linea.tipo_prenda, d, tarifas, materiales).reduce((s, l) => s + l.precio, 0),
+    0,
+  );
 }
 
 /** Una prenda de cantidad 1 por unidad del bloque. */
@@ -127,7 +149,7 @@ export function aFormularios(linea: LineaEditable): PrendaFormulario[] {
     tipo_prenda: Number(linea.tipo_prenda),
     material: Number(d.material),
     cantidad: 1,
-    peso: d.peso.trim() === "" ? null : d.peso,
+    peso: d.peso,
     talla: d.talla,
     genero: d.genero,
     color: d.color.trim(),

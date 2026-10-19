@@ -5,7 +5,7 @@ import { formatCOP } from "@/lib/format";
 import { ClayButton, ClayField, ClayInput, ClaySelect } from "../components/ui/clay";
 import {
   ajustarUnidades,
-  cobraPorKilo,
+  cotizarUnidad,
   datosDe,
   difierenDelBloque,
   subtotalEstimado,
@@ -24,9 +24,11 @@ function CamposPrenda({
   materiales,
   servicios,
   tarifas,
+  unidades,
   onChange,
 }: {
   datos: DatosPrenda;
+  unidades: number;
   tipo: string;
   materiales: Material[];
   servicios: Servicio[];
@@ -34,9 +36,9 @@ function CamposPrenda({
   onChange: (datos: DatosPrenda) => void;
 }) {
   const cambiar = (campo: keyof DatosPrenda, valor: string) => onChange({ ...datos, [campo]: valor });
-  const porKilo = cobraPorKilo(tipo, datos.servicios, tarifas);
   const hayTallaLibre = datos.talla !== "" && !(TALLAS as readonly string[]).includes(datos.talla);
-  const disponibles = tipo ? servicios.filter((s) => tarifaDe(tarifas, Number(tipo), s.id)) : [];
+  const lineas = cotizarUnidad(tipo, datos, tarifas, materiales);
+  const nombreDe = (id: number) => servicios.find((x) => x.id === id)?.nombre ?? "";
 
   function alternarServicio(servicio: number) {
     const elegidos = datos.servicios.includes(servicio)
@@ -51,28 +53,30 @@ function CamposPrenda({
         <p className="text-sm font-medium text-(--sw-ink-soft)">Servicios</p>
         {!tipo ? (
           <p className="mt-1 text-sm text-(--sw-ink-soft)">Elige primero el tipo de prenda.</p>
-        ) : disponibles.length === 0 ? (
-          <p className="mt-1 text-sm text-(--sw-ink-soft)">
-            Este tipo de prenda no tiene tarifas vigentes. Configuralas en el catalogo.
-          </p>
+        ) : servicios.length === 0 ? (
+          <p className="mt-1 text-sm text-(--sw-ink-soft)">Todavia no hay servicios en el catalogo.</p>
         ) : (
           <div className="mt-2 flex flex-wrap gap-x-5 gap-y-2">
-            {disponibles.map((s) => {
+            {servicios.map((s) => {
               const tarifa = tarifaDe(tarifas, Number(tipo), s.id);
               return (
-                <label key={s.id} className="flex items-center gap-2 text-sm text-(--sw-ink)">
+                <label
+                  key={s.id}
+                  className={`flex items-center gap-2 text-sm ${tarifa ? "text-(--sw-ink)" : "text-(--sw-ink-soft)"}`}
+                >
                   <input
                     type="checkbox"
                     className="size-4"
                     checked={datos.servicios.includes(s.id)}
+                    disabled={!tarifa}
                     onChange={() => alternarServicio(s.id)}
                   />
                   {s.nombre}
-                  {tarifa && (
-                    <span className="text-(--sw-ink-soft)">
-                      · {formatCOP(tarifa.valor)} por {tarifa.unidad_cobro}
-                    </span>
-                  )}
+                  <span className="text-(--sw-ink-soft)">
+                    {tarifa
+                      ? `· ${formatCOP(tarifa.valor_base)} + ${formatCOP(tarifa.precio_por_kilo)}/kg`
+                      : "· sin tarifa vigente: pidele al administrador que la configure"}
+                  </span>
                 </label>
               );
             })}
@@ -92,14 +96,14 @@ function CamposPrenda({
         </ClayField>
       </div>
       <div className="sm:col-span-2">
-        <ClayField label={porKilo ? "Peso en kg (obligatorio)" : "Peso en kg"}>
+        <ClayField label="Peso de la prenda en kg">
           <ClayInput
             type="number"
             min="0.01"
             step="0.01"
             value={datos.peso}
             onChange={(e) => cambiar("peso", e.target.value)}
-            required={porKilo}
+            required
           />
         </ClayField>
       </div>
@@ -142,6 +146,26 @@ function CamposPrenda({
           />
         </ClayField>
       </div>
+      <p className="text-xs text-(--sw-ink-soft) sm:col-span-6">
+        El peso y el material cambian el precio: (base + peso x precio por kilo) x factor del material, a la
+        centena.
+      </p>
+      {lineas.length > 0 && (
+        <ul className="flex flex-col gap-1 text-xs text-(--sw-ink-soft) sm:col-span-6">
+          {lineas.map((l) => (
+            <li key={l.servicio}>
+              <span className="font-semibold text-(--sw-ink)">{nombreDe(l.servicio)}</span>:{" "}
+              {l.tarifa
+                ? `${formatCOP(l.tarifa.valor_base)} + ${l.peso} kg x ${formatCOP(l.tarifa.precio_por_kilo)}${
+                    l.nivel ? ` · ${l.nivel} x${l.factor}` : ""
+                  }${l.tarifa.tipo_prenda !== null ? " · tarifa del tipo" : ""} = ${formatCOP(l.precio)}${
+                    unidades > 1 ? ` por prenda (${unidades} prendas: ${formatCOP(l.precio * unidades)})` : ""
+                  }`
+                : "sin tarifa vigente"}
+            </li>
+          ))}
+        </ul>
+      )}
     </>
   );
 }
@@ -166,10 +190,11 @@ export default function LineaPrenda({
   onQuitar?: () => void;
 }) {
   const tipo = Number(linea.tipo_prenda);
-  const subtotal = subtotalEstimado(linea, tarifas);
+  const subtotal = subtotalEstimado(linea, tarifas, materiales);
   const nombre = tiposPrenda.find((t) => t.id === tipo)?.nombre ?? "Prenda";
   const unidades = linea.unidades;
   const campos = { tipo: linea.tipo_prenda, materiales, servicios, tarifas };
+  const prendas = unidadesDeCantidad(linea);
 
   function cambiarCantidad(valor: string) {
     const nueva = { ...linea, cantidad: valor };
@@ -179,11 +204,20 @@ export default function LineaPrenda({
   function cambiarTipo(valor: string) {
     const nuevoTipo = Number(valor);
     const vigentes = (elegidos: number[]) => elegidos.filter((s) => tarifaDe(tarifas, nuevoTipo, s));
+    const estandar = (id: number) => {
+      const peso = tiposPrenda.find((t) => t.id === id)?.peso_estandar;
+      return peso ? String(Number(peso)) : null;
+    };
+    // El peso se reemplaza solo si esta vacio o es el estandar del tipo anterior: lo que
+    // la recepcionista escribio a mano se respeta.
+    const pesoPara = (actual: string) =>
+      actual === "" || actual === estandar(tipo) ? (estandar(nuevoTipo) ?? actual) : actual;
     onChange({
       ...linea,
       tipo_prenda: valor,
+      peso: pesoPara(linea.peso),
       servicios: vigentes(linea.servicios),
-      unidades: unidades.map((u) => ({ ...u, servicios: vigentes(u.servicios) })),
+      unidades: unidades.map((u) => ({ ...u, peso: pesoPara(u.peso), servicios: vigentes(u.servicios) })),
     });
   }
 
@@ -245,7 +279,7 @@ export default function LineaPrenda({
             <legend className="px-1 text-xs font-bold text-(--sw-ink-soft)">
               {nombre} {i + 1}
             </legend>
-            <CamposPrenda datos={unidad} {...campos} onChange={(d) => cambiarUnidad(unidad.clave, d)} />
+            <CamposPrenda datos={unidad} unidades={1} {...campos} onChange={(d) => cambiarUnidad(unidad.clave, d)} />
             {unidades.length > 1 && (
               <div className="flex items-end sm:col-span-2">
                 <ClayButton type="button" variant="secundario" onClick={() => copiarALasDemas(unidad)}>
@@ -256,7 +290,7 @@ export default function LineaPrenda({
           </fieldset>
         ))
       ) : (
-        <CamposPrenda datos={linea} {...campos} onChange={(d) => onChange({ ...linea, ...d })} />
+        <CamposPrenda datos={linea} unidades={prendas} {...campos} onChange={(d) => onChange({ ...linea, ...d })} />
       )}
 
       <div className="flex flex-wrap items-center justify-between gap-3 sm:col-span-6">
