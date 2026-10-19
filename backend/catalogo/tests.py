@@ -2,12 +2,14 @@ from datetime import date
 from decimal import Decimal
 
 from django.contrib.auth import get_user_model
-from django.db import IntegrityError
+from django.db import IntegrityError, connection
 from django.db.models import ProtectedError
 from django.test import TestCase
+from django.test.utils import CaptureQueriesContext
 from rest_framework.test import APITestCase
 
 from .models import Material, NivelDificultad, Servicio, Tarifa, TipoPrenda
+from .serializers import TarifaSerializer
 
 User = get_user_model()
 
@@ -536,3 +538,66 @@ class CatalogoPermisosTests(APITestCase):
         self.client.login(username="admin", password="smartwash123")
         response = self.client.post("/api/catalogo/servicios", {"nombre": "Planchado"})
         self.assertEqual(response.status_code, 201)
+
+
+class BloqueoDeTarifaVigenteTests(APITestCase):
+    """PostgreSQL no admite FOR UPDATE sobre el lado nulable de un LEFT JOIN, y el
+    orden por defecto de Tarifa (tipo_prenda__nombre) lo genera si tipo_prenda es nulo.
+    SQLite ignora el bloqueo: estas pruebas solo detectan el 500 corriendo contra PostgreSQL
+    (DATABASE_URL=postgres://...), pero la comprobacion del SQL vale en cualquier base."""
+
+    def setUp(self):
+        self.admin = User.objects.create_user(username="admin", password="x", rol=User.Rol.ADMINISTRADOR)
+        self.client.force_authenticate(self.admin)
+        self.lavado = Servicio.objects.create(nombre="Lavado")
+        self.camisa = TipoPrenda.objects.create(nombre="Camisa")
+
+    def datos(self, tipo=None, **extra):
+        datos = {
+            "servicio": self.lavado.pk,
+            "valor_base": "5000",
+            "precio_por_kilo": "8000",
+            "plazo_entrega_dias": 2,
+            "vigente_desde": "2026-01-01",
+        }
+        if tipo is not None:
+            datos["tipo_prenda"] = tipo.pk
+        datos.update(extra)
+        return datos
+
+    def test_la_consulta_de_bloqueo_no_lleva_joins_ni_orden(self):
+        for tipo in (None, self.camisa):
+            with self.subTest(tipo=tipo):
+                consulta = TarifaSerializer.tarifa_vigente_a_bloquear(tipo, self.lavado)
+                self.assertNotIn("JOIN", str(consulta.query).upper())
+                self.assertNotIn("ORDER BY", str(consulta.query).upper())
+
+    def test_el_bloqueo_que_se_ejecuta_no_lleva_joins(self):
+        with CaptureQueriesContext(connection) as consultas:
+            self.client.post("/api/catalogo/tarifas", self.datos())
+            self.client.post("/api/catalogo/tarifas", self.datos(valor_base="6000", vigente_desde="2026-06-01"))
+        bloqueos = [q["sql"] for q in consultas if "FOR UPDATE" in q["sql"].upper()]
+        if connection.features.has_select_for_update:
+            self.assertTrue(bloqueos)
+        for sql in bloqueos:
+            self.assertNotIn("JOIN", sql.upper())
+
+    def test_crea_una_tarifa_general_y_otra_que_cierra_la_anterior(self):
+        primera = self.client.post("/api/catalogo/tarifas", self.datos())
+        self.assertEqual(primera.status_code, 201, primera.content)
+        segunda = self.client.post(
+            "/api/catalogo/tarifas", self.datos(valor_base="6000", vigente_desde="2026-06-01")
+        )
+        self.assertEqual(segunda.status_code, 201, segunda.content)
+        anterior = Tarifa.objects.get(pk=primera.json()["id"])
+        self.assertEqual(anterior.vigente_hasta, date(2026, 6, 1))
+        generales = Tarifa.objects.filter(tipo_prenda__isnull=True, vigente_hasta__isnull=True)
+        self.assertEqual([t.valor_base for t in generales], [Decimal("6000.00")])
+
+    def test_crea_una_excepcion_por_tipo_y_otra_que_cierra_la_anterior(self):
+        self.assertEqual(self.client.post("/api/catalogo/tarifas", self.datos(self.camisa)).status_code, 201)
+        segunda = self.client.post(
+            "/api/catalogo/tarifas", self.datos(self.camisa, valor_base="6000", vigente_desde="2026-06-01")
+        )
+        self.assertEqual(segunda.status_code, 201, segunda.content)
+        self.assertEqual(Tarifa.objects.filter(tipo_prenda=self.camisa, vigente_hasta__isnull=True).count(), 1)

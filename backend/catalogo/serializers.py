@@ -170,18 +170,23 @@ class TarifaSerializer(ConAutoriaSerializer):
             vigentes = vigentes.exclude(pk=self.instance.pk)
         return vigentes.first()
 
+    @staticmethod
+    def tarifa_vigente_a_bloquear(tipo_prenda, servicio):
+        # Sin orden por defecto: el de Tarifa pasa por tipo_prenda__nombre y, con tipo
+        # nulo (tarifa general), genera un LEFT JOIN; PostgreSQL no admite FOR UPDATE
+        # sobre el lado nulable de un join externo (SQLite ignora el bloqueo).
+        return (
+            Tarifa.objects.select_for_update(of=("self",))
+            .order_by()
+            .filter(tipo_prenda=tipo_prenda, servicio=servicio, vigente_hasta__isnull=True)
+        )
+
     @transaction.atomic
     def create(self, validated_data):
         if validated_data.get("vigente_hasta") is None:
-            anterior = (
-                Tarifa.objects.select_for_update()
-                .filter(
-                    tipo_prenda=validated_data.get("tipo_prenda"),
-                    servicio=validated_data["servicio"],
-                    vigente_hasta__isnull=True,
-                )
-                .first()
-            )
+            anterior = self.tarifa_vigente_a_bloquear(
+                validated_data.get("tipo_prenda"), validated_data["servicio"]
+            ).first()
             if anterior is not None:
                 anterior.vigente_hasta = validated_data["vigente_desde"]
                 anterior.registrar_autoria(self.context["request"].user)
