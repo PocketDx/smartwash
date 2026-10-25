@@ -1,3 +1,10 @@
+import base64
+from datetime import timedelta
+
+from django.conf import settings
+from django.db import transaction
+from django.db.models import Prefetch, Sum
+from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework import generics, serializers, status
@@ -7,6 +14,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from accounts.models import User
+from clientes.models import Cliente
 from core.permissions import (
     AdministradorORecepcionista,
     OperarioSoloSusOrdenes,
@@ -14,16 +22,30 @@ from core.permissions import (
     SoloOperario,
 )
 
+from .avisos import avisar_orden_lista
 from .historial import operacion_sobre_orden, registrar_evento
-from .models import HistorialOrden, Orden, Prenda
+from .models import (
+    FotoNovedad,
+    HistorialOrden,
+    Novedad,
+    Orden,
+    Prenda,
+    clasificacion_por_consumo,
+)
 from .serializers import (
     AgregarServicioSerializer,
     AsignacionSerializer,
     CambioEstadoSerializer,
+    DecisionNovedadSerializer,
     EntregaSerializer,
     HistorialOrdenSerializer,
+    NovedadEntradaSerializer,
+    NovedadSerializer,
     OperarioSerializer,
+    OrdenAlertaSerializer,
     OrdenBandejaSerializer,
+    OrdenConNovedadSerializer,
+    OrdenHistorialClienteSerializer,
     OrdenSerializer,
     PrendaEntradaSerializer,
     agregar_prenda,
@@ -32,6 +54,8 @@ from .serializers import (
     exigir_orden_editable,
     guardar_recalculo,
     operarios_activos,
+    registrar_decision,
+    registrar_novedades,
 )
 
 Evento = HistorialOrden.TipoEvento
@@ -52,6 +76,36 @@ class OrdenListCreateView(generics.ListCreateAPIView):
         if self.request.user.rol == User.Rol.OPERARIO:
             return ordenes.filter(operario=self.request.user)
         return ordenes
+
+
+class AlertasVencimientoView(generics.ListAPIView):
+    serializer_class = OrdenAlertaSerializer
+    # Antes de "Recibida" no hay fecha estimada; despues de "Lista" ya no hay que alertar.
+    ESTADOS_CON_ALERTA = (
+        Orden.Estado.RECIBIDA,
+        Orden.Estado.CLASIFICADA,
+        Orden.Estado.EN_PROCESO,
+        Orden.Estado.CONTROL_CALIDAD,
+        Orden.Estado.LISTA,
+        Orden.Estado.CON_NOVEDAD,
+    )
+
+    def get_serializer_context(self):
+        return {**super().get_serializer_context(), "hoy": self.hoy}
+
+    def get_queryset(self):
+        # localdate usa TIME_ZONE (America/Bogota): "hoy" es el de la lavanderia, no el de UTC.
+        self.hoy = timezone.localdate()
+        limite = self.hoy + timedelta(days=getattr(settings, "ORDEN_DIAS_ALERTA", 2))
+        ordenes = Orden.objects.filter(
+            estado__in=self.ESTADOS_CON_ALERTA,
+            fecha_estimada_entrega__isnull=False,
+            fecha_estimada_entrega__lte=limite,
+        )
+        if self.request.user.rol == User.Rol.OPERARIO:
+            ordenes = ordenes.filter(operario=self.request.user)
+        # La fecha mas antigua primero: las mas retrasadas encabezan la lista.
+        return ordenes.select_related("cliente").order_by("fecha_estimada_entrega", "creado_en")
 
 
 class OrdenDetailView(generics.RetrieveAPIView):
@@ -134,6 +188,17 @@ class AgregarServicioView(APIView):
         return respuesta_orden(orden)
 
 
+def reclasificar_cliente(cliente, usuario):
+    """Actualiza la clasificacion por consumo y devuelve la nota para el historial."""
+    anterior = cliente.clasificacion
+    cliente.clasificacion = clasificacion_por_consumo(cliente)
+    if cliente.clasificacion == anterior:
+        return ""
+    cliente.registrar_autoria(usuario)
+    cliente.save(update_fields=["clasificacion", "actualizado_por", "actualizado_en"])
+    return f". Cliente: {anterior} → {cliente.clasificacion}"
+
+
 class RegistrarEntregaView(APIView):
     permission_classes = [AdministradorORecepcionista]
 
@@ -146,15 +211,23 @@ class RegistrarEntregaView(APIView):
                 raise serializers.ValidationError(
                     {"estado": f'La orden esta "{orden.estado}"; solo se entrega desde "Lista para entrega".'}
                 )
-            detalle = entrada.verificar_contra(orden)
-            # save() exige el pago completo (HU24) e indica el saldo si falta.
-            orden.estado = Orden.Estado.ENTREGADA
-            orden.fecha_entrega = timezone.now()
-            orden.registrar_autoria(request.user)
-            orden.save()
-            registrar_evento(
-                orden, Evento.ENTREGA, request.user, f"Lista para entrega → Entregada. {detalle}"
-            )
+            no_coinciden = entrada.verificar_contra(orden)
+            if no_coinciden:
+                registrar_novedades(orden, no_coinciden, Novedad.Origen.ENTREGA, request.user)
+            else:
+                # save() exige el pago completo (HU24) e indica el saldo si falta.
+                orden.estado = Orden.Estado.ENTREGADA
+                orden.fecha_entrega = timezone.now()
+                orden.registrar_autoria(request.user)
+                orden.save()
+                registrar_evento(
+                    orden,
+                    Evento.ENTREGA,
+                    request.user,
+                    f"Lista para entrega → Entregada. {orden.prendas.count()} prendas "
+                    "verificadas, todas coinciden con lo solicitado"
+                    + reclasificar_cliente(orden.cliente, request.user),
+                )
         return Response(OrdenSerializer(ordenes_con_detalle().get(pk=orden.pk)).data)
 
 
@@ -183,6 +256,8 @@ class CambiarEstadoView(APIView):
             if nuevo == Orden.Estado.EN_PROCESO and anterior == Orden.Estado.CONTROL_CALIDAD:
                 detalle += f" (reproceso {orden.numero_reprocesos})"
             registrar_evento(orden, Evento.CAMBIO_ESTADO, request.user, detalle)
+            if nuevo == Orden.Estado.LISTA:
+                transaction.on_commit(lambda: avisar_orden_lista(orden))
         return Response(OrdenSerializer(ordenes_con_detalle().get(pk=orden.pk)).data)
 
 
@@ -220,3 +295,111 @@ class HistorialOrdenView(generics.ListAPIView):
     def get_queryset(self):
         orden = get_object_or_404(Orden, pk=self.kwargs["pk"])
         return orden.historial.select_related("usuario")
+
+
+class HistorialClienteView(APIView):
+    permission_classes = [AdministradorORecepcionista]
+
+    def get(self, request, pk):
+        cliente = get_object_or_404(Cliente, pk=pk)
+        ordenes = cliente.ordenes.order_by("-creado_en", "-id")
+        # Las canceladas se listan pero no son compra.
+        total = ordenes.exclude(estado=Orden.Estado.CANCELADA).aggregate(
+            total=Sum("valor_total")
+        )["total"]
+        return Response(
+            {
+                "cliente": {"id": cliente.pk, "nombre_completo": cliente.nombre_completo},
+                "numero_ordenes": ordenes.count(),
+                "total_comprado": serializers.DecimalField(
+                    max_digits=12, decimal_places=2
+                ).to_representation(total or 0),
+                "ordenes": OrdenHistorialClienteSerializer(ordenes, many=True).data,
+            }
+        )
+
+
+def exigir_acceso_a_la_orden(usuario, orden):
+    if usuario.rol == User.Rol.OPERARIO and orden.operario_id != usuario.pk:
+        raise PermissionDenied("La orden no esta asignada a este operario.")
+
+
+class NovedadesOrdenView(APIView):
+    ESTADOS_CON_PROCESO = (Orden.Estado.EN_PROCESO, Orden.Estado.CONTROL_CALIDAD)
+
+    def get(self, request, pk):
+        orden = get_object_or_404(Orden, pk=pk)
+        exigir_acceso_a_la_orden(request.user, orden)
+        novedades = orden.novedades.select_related(
+            "prenda__tipo_prenda", "prenda__material", "creado_por", "foto"
+        )
+        return Response(NovedadSerializer(novedades, many=True).data)
+
+    def post(self, request, pk):
+        if request.user.rol == User.Rol.RECEPCIONISTA:
+            raise PermissionDenied(
+                "Durante el proceso registran la novedad el operario asignado o el administrador."
+            )
+        exigir_acceso_a_la_orden(request.user, get_object_or_404(Orden, pk=pk))
+        entrada = NovedadEntradaSerializer(data=request.data)
+        entrada.is_valid(raise_exception=True)
+        datos = entrada.validated_data
+        with operacion_sobre_orden():
+            orden = get_object_or_404(Orden.objects.select_for_update(), pk=pk)
+            if orden.estado not in self.ESTADOS_CON_PROCESO:
+                raise serializers.ValidationError(
+                    {
+                        "estado": f'La orden esta "{orden.estado}"; la novedad se registra '
+                        'con la orden "En proceso" o "Control de calidad".'
+                    }
+                )
+            prenda = orden.prendas.filter(pk=datos["prenda"]).first()
+            if prenda is None:
+                raise serializers.ValidationError({"prenda": "La prenda no pertenece a la orden."})
+            registrar_novedades(
+                orden,
+                [(prenda, datos["descripcion"], datos["foto"])],
+                Novedad.Origen.PROCESO,
+                request.user,
+            )
+        novedad = orden.novedades.select_related("creado_por", "foto").last()
+        return Response(NovedadSerializer(novedad).data, status=status.HTTP_201_CREATED)
+
+
+class FotoNovedadView(APIView):
+    def get(self, request, pk):
+        foto = get_object_or_404(FotoNovedad.objects.select_related("novedad__orden"), novedad=pk)
+        exigir_acceso_a_la_orden(request.user, foto.novedad.orden)
+        return HttpResponse(base64.b64decode(foto.contenido), content_type=foto.tipo)
+
+
+class OrdenesConNovedadView(generics.ListAPIView):
+    serializer_class = OrdenConNovedadSerializer
+    permission_classes = [AdministradorORecepcionista]
+
+    def get_queryset(self):
+        pendientes = Novedad.objects.pendientes().select_related(
+            "prenda__tipo_prenda", "prenda__material", "creado_por", "foto"
+        )
+        return (
+            Orden.objects.filter(estado=Orden.Estado.CON_NOVEDAD)
+            .select_related("cliente", "operario")
+            .prefetch_related(Prefetch("novedades", pendientes, to_attr="novedades_pendientes"))
+        )
+
+
+class DecisionNovedadView(APIView):
+    permission_classes = [AdministradorORecepcionista]
+
+    def post(self, request, pk):
+        entrada = DecisionNovedadSerializer(data=request.data)
+        entrada.is_valid(raise_exception=True)
+        with operacion_sobre_orden():
+            orden = get_object_or_404(Orden.objects.select_for_update(), pk=pk)
+            registrar_decision(
+                orden,
+                entrada.validated_data["decision"],
+                entrada.validated_data["observacion"],
+                request.user,
+            )
+        return Response(OrdenSerializer(ordenes_con_detalle().get(pk=orden.pk)).data)

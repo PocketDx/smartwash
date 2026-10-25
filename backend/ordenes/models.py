@@ -4,7 +4,7 @@ from decimal import ROUND_CEILING, Decimal
 from django.conf import settings
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.db import models
-from django.db.models import Sum
+from django.db.models import Count, Sum
 from django.utils import timezone
 from django.utils.crypto import get_random_string
 
@@ -47,6 +47,7 @@ class Orden(ModeloConAutoria):
         ENTREGADA = "Entregada", "Entregada"
         CANCELADA = "Cancelada", "Cancelada"
         EN_ESPERA = "En espera", "En espera"
+        CON_NOVEDAD = "Con novedad", "Con novedad"
 
     # Entregada no figura: solo se llega por /entrega, que verifica las prendas.
     TRANSICIONES = {
@@ -158,6 +159,13 @@ class Orden(ModeloConAutoria):
         )
 
     def cambiar_estado(self, nuevo):
+        if self.estado == self.Estado.CON_NOVEDAD:
+            raise ValidationError(
+                {
+                    "estado": "La orden tiene una novedad pendiente: no avanza hasta que "
+                    "se registre la decision del cliente."
+                }
+            )
         if self.estado == self.Estado.EN_ESPERA:
             falta = max(self.abono_requerido - self.total_pagado(), Decimal("0"))
             raise ValidationError(
@@ -227,6 +235,34 @@ class Orden(ModeloConAutoria):
             self.fecha_estimada_entrega = sumar_dias_habiles(
                 self.abono_alcanzado_en, self.duracion_estimada_dias
             )
+
+
+RANGO_CLASIFICACION = (
+    Cliente.Clasificacion.OCASIONAL,
+    Cliente.Clasificacion.FRECUENTE,
+    Cliente.Clasificacion.VIP,
+)
+
+
+def clasificacion_por_consumo(cliente):
+    """Clasifica por las ordenes cerradas del cliente; nunca baja de la que ya tiene.
+
+    Una orden solo llega a "Entregada" con el pago completo (HU24), asi que
+    entregada equivale a cerrada. valor_total es lo cobrado, con el descuento.
+    """
+    consumo = cliente.ordenes.filter(estado=Orden.Estado.ENTREGADA).aggregate(
+        ordenes=Count("id"), total=Sum("valor_total")
+    )
+    ordenes, total = consumo["ordenes"], consumo["total"] or Decimal("0")
+    if ordenes >= getattr(settings, "CLIENTE_VIP_MIN_ORDENES", 10) or total >= getattr(
+        settings, "CLIENTE_VIP_MIN_CONSUMO", Decimal("500000")
+    ):
+        calculada = Cliente.Clasificacion.VIP
+    elif ordenes >= getattr(settings, "CLIENTE_FRECUENTE_MIN_ORDENES", 3):
+        calculada = Cliente.Clasificacion.FRECUENTE
+    else:
+        calculada = Cliente.Clasificacion.OCASIONAL
+    return max(cliente.clasificacion, calculada, key=RANGO_CLASIFICACION.index)
 
 
 class Prenda(ModeloConAutoria):
@@ -334,6 +370,9 @@ class HistorialOrden(models.Model):
         PRENDA_AGREGADA = "prenda_agregada", "Prenda agregada"
         SERVICIO_AGREGADO = "servicio_agregado", "Servicio agregado"
         ENTREGA = "entrega", "Entrega"
+        NOVEDAD = "novedad", "Novedad"
+        DECISION_NOVEDAD = "decision_novedad", "Decisión sobre la novedad"
+        NOTIFICACION = "notificacion", "Notificación al cliente"
 
     # PROTECT en ambos: borrar la orden o el usuario dejaria el historial
     # incompleto o sin autor.
@@ -373,3 +412,65 @@ class HistorialOrden(models.Model):
 
     def delete(self, *args, **kwargs):
         raise PermissionDenied(MENSAJE_HISTORIAL_INMUTABLE)
+
+
+class NovedadQuerySet(models.QuerySet):
+    def pendientes(self):
+        # "No continuar" deja la orden retenida: la novedad sigue abierta hasta otra decision o la cancelacion.
+        return self.filter(
+            models.Q(decision__isnull=True) | models.Q(decision="no_continuar"),
+            orden__estado=Orden.Estado.CON_NOVEDAD,
+        )
+
+
+class Novedad(ModeloConAutoria):
+    class Origen(models.TextChoices):
+        PROCESO = "proceso", "Durante el proceso"
+        ENTREGA = "entrega", "Detectada en la entrega"
+
+    class Decision(models.TextChoices):
+        CONTINUAR = "continuar", "Continuar igual"
+        REPROCESAR = "reprocesar", "Reprocesar"
+        NO_CONTINUAR = "no_continuar", "No continuar"
+
+    orden = models.ForeignKey(Orden, on_delete=models.PROTECT, related_name="novedades")
+    prenda = models.ForeignKey(Prenda, on_delete=models.PROTECT, related_name="novedades")
+    descripcion = models.TextField()
+    origen = models.CharField(max_length=20, choices=Origen.choices)
+    # A donde vuelve la orden si el cliente decide continuar igual (HU19).
+    estado_anterior = models.CharField(max_length=30, choices=Orden.Estado.choices)
+    decision = models.CharField(max_length=20, choices=Decision.choices, null=True, blank=True)
+    decision_observacion = models.TextField(blank=True)
+    decidida_por = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="decisiones_de_novedad",
+    )
+    decidida_en = models.DateTimeField(null=True, blank=True)
+
+    objects = NovedadQuerySet.as_manager()
+
+    class Meta:
+        verbose_name_plural = "novedades"
+        ordering = ("creado_en", "id")
+
+    def __str__(self):
+        return f"{self.orden.codigo} · {self.prenda} · {self.get_origen_display()}"
+
+
+class FotoNovedad(ModeloConAutoria):
+    # ponytail: base64 en la base por decision del PO (max. 500 KB); pasar a
+    # almacenamiento de objetos cambia solo este modelo y la vista de la foto.
+    novedad = models.OneToOneField(Novedad, on_delete=models.CASCADE, related_name="foto")
+    contenido = models.TextField()
+    tipo = models.CharField(max_length=20)
+    tamano = models.PositiveIntegerField(help_text="Bytes de la imagen decodificada.")
+
+    class Meta:
+        verbose_name = "foto de la novedad"
+        verbose_name_plural = "fotos de novedades"
+
+    def __str__(self):
+        return f"Foto de {self.novedad}"
