@@ -3,12 +3,13 @@ from decimal import ROUND_CEILING, Decimal
 
 from django.conf import settings
 from django.core.exceptions import PermissionDenied, ValidationError
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
-from django.db.models import Sum
+from django.db.models import Count, Sum
 from django.utils import timezone
 from django.utils.crypto import get_random_string
 
-from catalogo.models import Material, Tarifa, TipoPrenda
+from catalogo.models import Material, Tarifa, TipoPrenda, redondear_a_100
 from clientes.models import Cliente
 from core.models import ModeloConAutoria
 from fidelizacion.models import ReglaDescuento
@@ -47,6 +48,7 @@ class Orden(ModeloConAutoria):
         ENTREGADA = "Entregada", "Entregada"
         CANCELADA = "Cancelada", "Cancelada"
         EN_ESPERA = "En espera", "En espera"
+        CON_NOVEDAD = "Con novedad", "Con novedad"
 
     # Entregada no figura: solo se llega por /entrega, que verifica las prendas.
     TRANSICIONES = {
@@ -55,6 +57,7 @@ class Orden(ModeloConAutoria):
         Estado.EN_PROCESO: (Estado.CONTROL_CALIDAD,),
         Estado.CONTROL_CALIDAD: (Estado.LISTA, Estado.EN_PROCESO),
     }
+    ESTADOS_CANCELABLES = (Estado.EN_ESPERA, Estado.RECIBIDA, Estado.CLASIFICADA)
 
     class EstadoPago(models.TextChoices):
         PENDIENTE = "Pendiente", "Pendiente"
@@ -91,6 +94,10 @@ class Orden(ModeloConAutoria):
     fecha_entrega = models.DateTimeField(null=True, blank=True)
     subtotal = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     descuento = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    # Aparte de `descuento` (fidelizacion, HU08), que recalcular() vuelve a
+    # evaluar con la fecha del dia: mezclarlos borraria estos al recalcular.
+    descuento_novedad = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    descuento_dano = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     valor_total = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     abono_requerido = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     duracion_estimada_dias = models.PositiveSmallIntegerField(default=0)
@@ -157,7 +164,41 @@ class Orden(ModeloConAutoria):
             }
         )
 
+    def exigir_no_cancelada(self):
+        if self.estado == self.Estado.CANCELADA:
+            raise ValidationError(
+                {"estado": "La orden esta cancelada; la cancelacion es definitiva."}
+            )
+
+    def rechazada_por_el_cliente(self):
+        if self.estado != self.Estado.CON_NOVEDAD:
+            return False
+        ultima = self.novedades.order_by("creado_en", "id").last()
+        return ultima is not None and ultima.decision == Novedad.Decision.NO_CONTINUAR
+
+    def cancelar(self, motivo):
+        self.exigir_no_cancelada()
+        # "Con novedad" + "no continuar" ya inicio el servicio, pero sin cancelar no tendria salida (HU19).
+        if self.estado not in self.ESTADOS_CANCELABLES and not self.rechazada_por_el_cliente():
+            raise ValidationError(
+                {
+                    "estado": f'La orden esta "{self.estado}": el servicio ya inicio '
+                    "y no se puede cancelar."
+                }
+            )
+        self.estado = self.Estado.CANCELADA
+        self.motivo_cancelacion = motivo
+        self.operario = None
+
     def cambiar_estado(self, nuevo):
+        self.exigir_no_cancelada()
+        if self.estado == self.Estado.CON_NOVEDAD:
+            raise ValidationError(
+                {
+                    "estado": "La orden tiene una novedad pendiente: no avanza hasta que "
+                    "se registre la decision del cliente."
+                }
+            )
         if self.estado == self.Estado.EN_ESPERA:
             falta = max(self.abono_requerido - self.total_pagado(), Decimal("0"))
             raise ValidationError(
@@ -190,6 +231,16 @@ class Orden(ModeloConAutoria):
     def pago_completo(self):
         return self.total_pagado() >= self.valor_total
 
+    def saldo_a_favor(self):
+        """Lo pagado de mas por los descuentos, mientras no se haya devuelto.
+
+        Se devuelve al entregar o cancelar, y los pagos no se editan: despues
+        de esos estados el excedente ya no es del cliente.
+        """
+        if self.estado in (self.Estado.ENTREGADA, self.Estado.CANCELADA):
+            return Decimal("0")
+        return max(self.total_pagado() - self.valor_total, Decimal("0"))
+
     def tiene_abono(self):
         return self.abono_alcanzado_en is not None
 
@@ -215,7 +266,7 @@ class Orden(ModeloConAutoria):
         self.descuento = ReglaDescuento.objects.mayor_descuento(
             self.cliente, self.subtotal, timezone.localdate()
         )
-        self.valor_total = self.subtotal - self.descuento
+        self.aplicar_descuentos_por_incidencia()
         if not self.tiene_abono():
             self.abono_requerido = (self.valor_total * PORCENTAJE_ABONO / 100).to_integral_value(
                 ROUND_CEILING
@@ -227,6 +278,48 @@ class Orden(ModeloConAutoria):
             self.fecha_estimada_entrega = sumar_dias_habiles(
                 self.abono_alcanzado_en, self.duracion_estimada_dias
             )
+
+    def aplicar_descuentos_por_incidencia(self):
+        """Toma los descuentos por novedad y por dano de sus registros. No guarda."""
+        if self.pk is not None:
+            self.descuento_novedad = (
+                self.novedades.aggregate(total=Sum("monto_descuento"))["total"] or Decimal("0")
+            )
+            self.descuento_dano = (
+                self.danos.aggregate(total=Sum("valor_servicio"))["total"] or Decimal("0")
+            )
+        self.valor_total = max(
+            self.subtotal - self.descuento - self.descuento_novedad - self.descuento_dano,
+            Decimal("0"),
+        )
+
+
+RANGO_CLASIFICACION = (
+    Cliente.Clasificacion.OCASIONAL,
+    Cliente.Clasificacion.FRECUENTE,
+    Cliente.Clasificacion.VIP,
+)
+
+
+def clasificacion_por_consumo(cliente):
+    """Clasifica por las ordenes cerradas del cliente; nunca baja de la que ya tiene.
+
+    Una orden solo llega a "Entregada" con el pago completo (HU24), asi que
+    entregada equivale a cerrada. valor_total es lo cobrado, con el descuento.
+    """
+    consumo = cliente.ordenes.filter(estado=Orden.Estado.ENTREGADA).aggregate(
+        ordenes=Count("id"), total=Sum("valor_total")
+    )
+    ordenes, total = consumo["ordenes"], consumo["total"] or Decimal("0")
+    if ordenes >= getattr(settings, "CLIENTE_VIP_MIN_ORDENES", 10) or total >= getattr(
+        settings, "CLIENTE_VIP_MIN_CONSUMO", Decimal("500000")
+    ):
+        calculada = Cliente.Clasificacion.VIP
+    elif ordenes >= getattr(settings, "CLIENTE_FRECUENTE_MIN_ORDENES", 3):
+        calculada = Cliente.Clasificacion.FRECUENTE
+    else:
+        calculada = Cliente.Clasificacion.OCASIONAL
+    return max(cliente.clasificacion, calculada, key=RANGO_CLASIFICACION.index)
 
 
 class Prenda(ModeloConAutoria):
@@ -267,6 +360,9 @@ class Prenda(ModeloConAutoria):
     def __str__(self):
         nombre = f"{self.tipo_prenda} · {self.material}" if self.material_id else str(self.tipo_prenda)
         return f"{self.cantidad} x {nombre}"
+
+    def valor(self):
+        return self.servicios.aggregate(total=Sum("valor_aplicado"))["total"] or Decimal("0")
 
 
 class OrdenServicio(ModeloConAutoria):
@@ -334,6 +430,13 @@ class HistorialOrden(models.Model):
         PRENDA_AGREGADA = "prenda_agregada", "Prenda agregada"
         SERVICIO_AGREGADO = "servicio_agregado", "Servicio agregado"
         ENTREGA = "entrega", "Entrega"
+        NOVEDAD = "novedad", "Novedad"
+        DECISION_NOVEDAD = "decision_novedad", "Decisión sobre la novedad"
+        NOTIFICACION = "notificacion", "Notificación al cliente"
+        CANCELACION = "cancelacion", "Cancelación"
+        DEVOLUCION = "devolucion", "Devolución"
+        DANO_PRENDA = "dano_prenda", "Daño o pérdida de prenda"
+        PAGO_DANO = "pago_dano", "Pago al cliente por daño o pérdida"
 
     # PROTECT en ambos: borrar la orden o el usuario dejaria el historial
     # incompleto o sin autor.
@@ -373,3 +476,213 @@ class HistorialOrden(models.Model):
 
     def delete(self, *args, **kwargs):
         raise PermissionDenied(MENSAJE_HISTORIAL_INMUTABLE)
+
+
+class NovedadQuerySet(models.QuerySet):
+    def pendientes(self):
+        # "No continuar" deja la orden retenida: la novedad sigue abierta hasta otra decision o la cancelacion.
+        return self.filter(
+            models.Q(decision__isnull=True) | models.Q(decision="no_continuar"),
+            orden__estado=Orden.Estado.CON_NOVEDAD,
+        )
+
+
+class Novedad(ModeloConAutoria):
+    class Origen(models.TextChoices):
+        PROCESO = "proceso", "Durante el proceso"
+        ENTREGA = "entrega", "Detectada en la entrega"
+
+    class Decision(models.TextChoices):
+        CONTINUAR = "continuar", "Continuar igual"
+        REPROCESAR = "reprocesar", "Reprocesar"
+        NO_CONTINUAR = "no_continuar", "No continuar"
+        ENTREGAR_CON_DESCUENTO = "entregar_con_descuento", "Entregar con descuento"
+        REPROCESAR_CON_DESCUENTO = "reprocesar_con_descuento", "Reprocesar con descuento"
+
+    class Gravedad(models.TextChoices):
+        LEVE = "leve", "Leve"
+        MODERADA = "moderada", "Moderada"
+        NOTORIA = "notoria", "Notoria"
+
+    orden = models.ForeignKey(Orden, on_delete=models.PROTECT, related_name="novedades")
+    prenda = models.ForeignKey(Prenda, on_delete=models.PROTECT, related_name="novedades")
+    descripcion = models.TextField()
+    origen = models.CharField(max_length=20, choices=Origen.choices)
+    # A donde vuelve la orden si el cliente decide continuar igual (HU19).
+    estado_anterior = models.CharField(max_length=30, choices=Orden.Estado.choices)
+    decision = models.CharField(max_length=30, choices=Decision.choices, null=True, blank=True)
+    decision_observacion = models.TextField(blank=True)
+    decidida_por = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="decisiones_de_novedad",
+    )
+    decidida_en = models.DateTimeField(null=True, blank=True)
+    # Lo aplicado se congela: si el administrador cambia los porcentajes, esta
+    # novedad conserva los suyos.
+    gravedad = models.CharField(max_length=20, choices=Gravedad.choices, blank=True)
+    porcentaje_descuento = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    monto_descuento = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+
+    objects = NovedadQuerySet.as_manager()
+
+    class Meta:
+        verbose_name_plural = "novedades"
+        ordering = ("creado_en", "id")
+
+    def __str__(self):
+        return f"{self.orden.codigo} · {self.prenda} · {self.get_origen_display()}"
+
+
+class FotoEnBase64(ModeloConAutoria):
+    # ponytail: base64 en la base por decision del PO (max. 500 KB); pasar a
+    # almacenamiento de objetos cambia solo estos modelos y las vistas de la foto.
+    contenido = models.TextField()
+    tipo = models.CharField(max_length=20)
+    tamano = models.PositiveIntegerField(help_text="Bytes de la imagen decodificada.")
+
+    class Meta:
+        abstract = True
+
+
+class FotoNovedad(FotoEnBase64):
+    novedad = models.OneToOneField(Novedad, on_delete=models.CASCADE, related_name="foto")
+
+    class Meta:
+        verbose_name = "foto de la novedad"
+        verbose_name_plural = "fotos de novedades"
+
+    def __str__(self):
+        return f"Foto de {self.novedad}"
+
+
+def porcentaje_valido():
+    return [MinValueValidator(Decimal("0")), MaxValueValidator(Decimal("100"))]
+
+
+class ConfiguracionDescuentoNovedad(ModeloConAutoria):
+    """Porcentajes de los descuentos por novedad de la entrega (HU19). Una sola fila."""
+
+    porcentaje_leve = models.DecimalField(
+        max_digits=5, decimal_places=2, default=Decimal("15"), validators=porcentaje_valido()
+    )
+    porcentaje_moderada = models.DecimalField(
+        max_digits=5, decimal_places=2, default=Decimal("35"), validators=porcentaje_valido()
+    )
+    porcentaje_notoria = models.DecimalField(
+        max_digits=5, decimal_places=2, default=Decimal("50"), validators=porcentaje_valido()
+    )
+    porcentaje_reproceso = models.DecimalField(
+        max_digits=5, decimal_places=2, default=Decimal("20"), validators=porcentaje_valido()
+    )
+    monto_minimo = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=Decimal("2000"),
+        validators=[MinValueValidator(Decimal("0"))],
+    )
+    tope_porcentaje = models.DecimalField(
+        max_digits=5, decimal_places=2, default=Decimal("50"), validators=porcentaje_valido()
+    )
+
+    class Meta:
+        verbose_name = "configuración de descuentos por novedad"
+        verbose_name_plural = "configuración de descuentos por novedad"
+
+    def __str__(self):
+        return "Descuentos por novedad"
+
+    @classmethod
+    def actual(cls):
+        return cls.objects.get_or_create(pk=1)[0]
+
+    def porcentaje_para(self, gravedad):
+        return getattr(self, f"porcentaje_{gravedad}")
+
+    def monto_descuento(self, valor_prenda, porcentaje, ya_descontado):
+        """Aplica el minimo por prenda y no deja que lo acumulado pase del tope."""
+        monto = max(redondear_a_100(valor_prenda * porcentaje / 100), self.monto_minimo)
+        tope = redondear_a_100(valor_prenda * self.tope_porcentaje / 100)
+        return max(min(monto, tope - ya_descontado), Decimal("0")).quantize(Decimal("0.01"))
+
+
+class CambioConfiguracionDescuento(models.Model):
+    usuario = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="+"
+    )
+    detalle = models.TextField()
+    fecha = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "cambio en los descuentos por novedad"
+        verbose_name_plural = "cambios en los descuentos por novedad"
+        ordering = ("-fecha", "-id")
+
+    def __str__(self):
+        return f"{self.usuario} · {self.fecha:%Y-%m-%d %H:%M}"
+
+
+class DanoPrenda(ModeloConAutoria):
+    """Prenda que la lavanderia dano o perdio (HU19).
+
+    valor_servicio es lo que se deja de cobrar en la orden; valor_declarado es
+    lo que la lavanderia le debe al cliente por la prenda, y no toca el total.
+    """
+
+    class Tipo(models.TextChoices):
+        DANO = "dano", "Daño"
+        PERDIDA = "perdida", "Pérdida"
+
+    class Estado(models.TextChoices):
+        PENDIENTE = "pendiente", "Pendiente de pago"
+        PAGADO = "pagado", "Pagado"
+
+    orden = models.ForeignKey(Orden, on_delete=models.PROTECT, related_name="danos")
+    prenda = models.OneToOneField(Prenda, on_delete=models.PROTECT, related_name="dano")
+    tipo = models.CharField(max_length=20, choices=Tipo.choices)
+    descripcion = models.TextField()
+    valor_declarado = models.DecimalField(max_digits=10, decimal_places=2)
+    valor_servicio = models.DecimalField(max_digits=10, decimal_places=2)
+    operario = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="danos_atribuidos",
+    )
+    estado = models.CharField(max_length=20, choices=Estado.choices, default=Estado.PENDIENTE)
+    pagado_por = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="danos_pagados",
+    )
+    pagado_en = models.DateTimeField(null=True, blank=True)
+    observacion_pago = models.TextField(blank=True)
+
+    class Meta:
+        verbose_name = "daño o pérdida de prenda"
+        verbose_name_plural = "daños y pérdidas de prendas"
+        ordering = ("-creado_en", "-id")
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(valor_declarado__gt=0), name="dano_valor_declarado_positivo"
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.get_tipo_display()} · {self.orden.codigo} · {self.prenda}"
+
+
+class FotoDano(FotoEnBase64):
+    dano = models.OneToOneField(DanoPrenda, on_delete=models.CASCADE, related_name="foto")
+
+    class Meta:
+        verbose_name = "foto del daño"
+        verbose_name_plural = "fotos de daños"
+
+    def __str__(self):
+        return f"Foto de {self.dano}"
