@@ -1,9 +1,11 @@
 "use client";
 
+import Link from "next/link";
 import { Fragment, useState } from "react";
 
 import type { Cliente } from "@/lib/api";
-import { ClayBadge, ClayButton, ClayCard } from "../components/ui/clay";
+import { ClayButton, ClayCard, clayBtnClass } from "../components/ui/clay";
+import { BadgeClasificacion } from "./clasificacion";
 import ClienteForm from "./cliente-form";
 
 export default function TablaClientes({ clientes }: { clientes: Cliente[] }) {
@@ -26,6 +28,7 @@ export default function TablaClientes({ clientes }: { clientes: Cliente[] }) {
             <th className="px-5 py-3">Documento</th>
             <th className="px-5 py-3">Telefono</th>
             <th className="px-5 py-3">Clasificacion</th>
+            <th className="px-5 py-3">Puntos</th>
             <th className="px-5 py-3">
               <span className="sr-only">Acciones</span>
             </th>
@@ -39,22 +42,30 @@ export default function TablaClientes({ clientes }: { clientes: Cliente[] }) {
                 <td data-label="Documento" className="px-5 py-3 text-(--sw-ink-soft)">{cliente.documento}</td>
                 <td data-label="Telefono" className="px-5 py-3 text-(--sw-ink-soft)">{cliente.telefono}</td>
                 <td data-label="Clasificacion" className="px-5 py-3">
-                  <ClayBadge color="mint">{cliente.clasificacion}</ClayBadge>
+                  <BadgeClasificacion clasificacion={cliente.clasificacion} />
                 </td>
-                <td className="px-5 py-3 text-right">
-                  <ClayButton
-                    type="button"
-                    variant="secundario"
-                    disabled={editandoId === cliente.id}
-                    onClick={() => setEditandoId(cliente.id)}
-                  >
-                    Editar
-                  </ClayButton>
+                <td data-label="Puntos" className="px-5 py-3 font-semibold text-(--sw-ink) tabular-nums">
+                  {cliente.puntos}
+                </td>
+                <td className="px-5 py-3">
+                  <div className="flex justify-end gap-2">
+                    <Link href={`/clientes/${cliente.id}/ordenes`} className={clayBtnClass("secundario")}>
+                      Historial
+                    </Link>
+                    <ClayButton
+                      type="button"
+                      variant="secundario"
+                      disabled={editandoId === cliente.id}
+                      onClick={() => setEditandoId(cliente.id)}
+                    >
+                      Editar
+                    </ClayButton>
+                  </div>
                 </td>
               </tr>
               {editandoId === cliente.id && (
                 <tr className="bg-(--sw-bg-deep)/30">
-                  <td colSpan={5} className="px-5 py-4">
+                  <td colSpan={6} className="px-5 py-4">
                     <ClienteForm cliente={cliente} onTerminar={() => setEditandoId(null)} />
                   </td>
                 </tr>

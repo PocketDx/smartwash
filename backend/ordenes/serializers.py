@@ -1,5 +1,10 @@
+import base64
+import binascii
 from decimal import Decimal
 
+from django.db import models
+from django.db.models import Sum
+from django.urls import reverse
 from django.utils import timezone
 from rest_framework import serializers
 
@@ -9,7 +14,17 @@ from catalogo.precios import calcular_precio
 from clientes.models import Cliente
 
 from .historial import operacion_sobre_orden, registrar_evento
-from .models import HistorialOrden, Orden, OrdenServicio, Prenda
+from .models import (
+    ConfiguracionDescuentoNovedad,
+    DanoPrenda,
+    FotoDano,
+    FotoNovedad,
+    HistorialOrden,
+    Novedad,
+    Orden,
+    OrdenServicio,
+    Prenda,
+)
 
 Evento = HistorialOrden.TipoEvento
 ESTADOS_QUE_ADMITEN_LINEAS = (
@@ -23,6 +38,11 @@ ESTADOS_CON_TRABAJO_EN_CURSO = (Orden.Estado.EN_PROCESO, Orden.Estado.CONTROL_CA
 
 def nombre_usuario(usuario):
     return usuario.get_full_name() or usuario.username
+
+
+def sin_ceros(valor):
+    """15.00 → "15" y 2000.00 → "2000", para los textos del historial."""
+    return f"{valor.normalize():f}"
 
 
 class HistorialOrdenSerializer(serializers.ModelSerializer):
@@ -49,6 +69,7 @@ class HistorialOrdenSerializer(serializers.ModelSerializer):
 
 
 def exigir_orden_editable(orden):
+    orden.exigir_no_cancelada()
     if orden.estado not in ESTADOS_QUE_ADMITEN_LINEAS:
         raise serializers.ValidationError(
             f'La orden esta "{orden.estado}": desde "En proceso" lo adicional va en otra orden.'
@@ -163,6 +184,7 @@ class PrendaSerializer(serializers.ModelSerializer):
     tipo_prenda_nombre = serializers.CharField(source="tipo_prenda.nombre", read_only=True)
     material_nombre = serializers.CharField(source="material.nombre", read_only=True, allow_null=True)
     servicios = OrdenServicioSerializer(many=True, read_only=True)
+    dano = serializers.SerializerMethodField()
 
     class Meta:
         model = Prenda
@@ -179,7 +201,11 @@ class PrendaSerializer(serializers.ModelSerializer):
             "color",
             "estado_inicial",
             "servicios",
+            "dano",
         )
+
+    def get_dano(self, prenda) -> str | None:
+        return prenda.dano.tipo if hasattr(prenda, "dano") else None
 
 
 class OrdenSerializer(serializers.ModelSerializer):
@@ -209,11 +235,14 @@ class OrdenSerializer(serializers.ModelSerializer):
             "estado_pago",
             "subtotal",
             "descuento",
+            "descuento_novedad",
+            "descuento_dano",
             "valor_total",
             "abono_requerido",
             "duracion_estimada_dias",
             "fecha_estimada_entrega",
             "fecha_entrega",
+            "motivo_cancelacion",
             "creado_en",
             "prendas",
             "detalle_prendas",
@@ -232,6 +261,7 @@ class OrdenSerializer(serializers.ModelSerializer):
             saldo_pendiente=f"{max(orden.valor_total - pagado, 0):.2f}",
             tiene_abono=orden.tiene_abono(),
             pago_completo=pagado >= orden.valor_total,
+            saldo_a_favor=f"{orden.saldo_a_favor():.2f}",
         )
         return datos
 
@@ -288,6 +318,7 @@ def asignar_operario(orden, operario, usuario):
     Desde "En proceso" la orden queda fija con su operario; solo el
     administrador la mueve, y solo si ese operario ya no esta activo.
     """
+    orden.exigir_no_cancelada()
     orden.exigir_abono()
     if orden.estado == Orden.Estado.EN_ESPERA:
         raise serializers.ValidationError(
@@ -343,17 +374,322 @@ class CambioEstadoSerializer(serializers.Serializer):
     estado = serializers.ChoiceField(choices=Orden.Estado.choices)
 
 
+LIMITE_FOTO_BYTES = 500 * 1024
+FIRMAS_DE_IMAGEN = ((b"\xff\xd8\xff", "image/jpeg"), (b"\x89PNG\r\n\x1a\n", "image/png"))
+
+
+def tipo_de_imagen(datos):
+    # Se miran los bytes y no el tipo que declara el data URL: ese lo escribe el cliente.
+    for firma, tipo in FIRMAS_DE_IMAGEN:
+        if datos.startswith(firma):
+            return tipo
+    if datos[:4] == b"RIFF" and datos[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
+class FotoField(serializers.CharField):
+    """Acepta un data URL (data:image/jpeg;base64,...) o el base64 sin prefijo."""
+
+    def to_internal_value(self, valor):
+        _, _, codificado = super().to_internal_value(valor).rpartition("base64,")
+        try:
+            datos = base64.b64decode(codificado, validate=True)
+        except (binascii.Error, ValueError):
+            raise serializers.ValidationError("La foto no es un base64 valido.")
+        tipo = tipo_de_imagen(datos)
+        if tipo is None:
+            raise serializers.ValidationError("El archivo no es una imagen JPEG, PNG o WebP.")
+        if len(datos) > LIMITE_FOTO_BYTES:
+            raise serializers.ValidationError(
+                f"La foto pesa {len(datos) // 1024} KB; el maximo es 500 KB."
+            )
+        return {"contenido": base64.b64encode(datos).decode(), "tipo": tipo, "tamano": len(datos)}
+
+
+def registrar_novedades(orden, novedades, origen, usuario):
+    """Guarda las novedades [(prenda, descripcion, foto)] y deja la orden "Con novedad".
+
+    Varias prendas generan una novedad cada una pero un solo evento en el historial.
+    """
+    anterior = orden.estado
+    resumen = []
+    for prenda, descripcion, foto in novedades:
+        novedad = Novedad(
+            orden=orden,
+            prenda=prenda,
+            descripcion=descripcion,
+            origen=origen,
+            estado_anterior=anterior,
+        )
+        novedad.registrar_autoria(usuario)
+        novedad.save()
+        if foto:
+            foto = FotoNovedad(novedad=novedad, **foto)
+            foto.registrar_autoria(usuario)
+            foto.save()
+        resumen.append(f"{prenda}: {descripcion} ({'con foto' if foto else 'sin foto'})")
+    orden.estado = Orden.Estado.CON_NOVEDAD
+    orden.registrar_autoria(usuario)
+    orden.save()
+    registrar_evento(
+        orden,
+        Evento.NOVEDAD,
+        usuario,
+        f"{anterior} → {orden.estado}, {Novedad.Origen(origen).label.lower()}. "
+        + "; ".join(resumen),
+    )
+
+
+DECISIONES_POR_ORIGEN = {
+    Novedad.Origen.PROCESO: (
+        Novedad.Decision.CONTINUAR,
+        Novedad.Decision.REPROCESAR,
+        Novedad.Decision.NO_CONTINUAR,
+    ),
+    Novedad.Origen.ENTREGA: (
+        Novedad.Decision.ENTREGAR_CON_DESCUENTO,
+        Novedad.Decision.REPROCESAR_CON_DESCUENTO,
+    ),
+}
+
+
+def aplicar_descuento(novedad, porcentaje, configuracion, gravedad=""):
+    """Congela en la novedad el descuento de su prenda y devuelve la nota para el historial."""
+    ya_descontado = (
+        Novedad.objects.filter(prenda=novedad.prenda)
+        .exclude(pk=novedad.pk)
+        .aggregate(total=Sum("monto_descuento"))["total"]
+        or Decimal("0")
+    )
+    novedad.gravedad = gravedad
+    novedad.porcentaje_descuento = porcentaje
+    novedad.monto_descuento = configuracion.monto_descuento(
+        novedad.prenda.valor(), porcentaje, ya_descontado
+    )
+    etiqueta = f"{Novedad.Gravedad(gravedad).label.lower()} " if gravedad else ""
+    return f"{novedad.prenda}: {etiqueta}{sin_ceros(porcentaje)} % → ${novedad.monto_descuento}"
+
+
+def operario_para_reproceso(orden, elegido):
+    """Por defecto vuelve al mismo operario; otro solo si se elige o si el original no esta activo."""
+    if elegido is not None:
+        return elegido
+    if orden.operario is None or not orden.operario.is_active:
+        raise serializers.ValidationError(
+            {"operario": "El operario que proceso la orden no esta activo: selecciona otro."}
+        )
+    return orden.operario
+
+
+def registrar_decision(orden, datos, usuario):
+    """Aplica la decision del cliente a todas las novedades pendientes de la orden.
+
+    "Entregar con descuento" deja la orden lista para que la vista la entregue
+    en la misma transaccion; si el pago no alcanza, se revierte todo.
+    """
+    decision, observacion = datos["decision"], datos["observacion"]
+    novedades = list(orden.novedades.pendientes().select_related("prenda"))
+    if orden.estado != Orden.Estado.CON_NOVEDAD or not novedades:
+        raise serializers.ValidationError(
+            {"estado": f'La orden esta "{orden.estado}" y no tiene una novedad pendiente.'}
+        )
+    origen = Novedad.Origen(novedades[0].origen)
+    permitidas = DECISIONES_POR_ORIGEN[origen]
+    if decision not in permitidas:
+        opciones = ", ".join(f'"{Novedad.Decision(d).label}"' for d in permitidas)
+        raise serializers.ValidationError(
+            {"decision": f"La novedad fue {origen.label.lower()}: las opciones son {opciones}."}
+        )
+
+    configuracion = ConfiguracionDescuentoNovedad.actual()
+    descuentos = []
+    reasignacion = None
+    if decision == Novedad.Decision.CONTINUAR:
+        orden.estado = novedades[0].estado_anterior
+    elif decision == Novedad.Decision.REPROCESAR:
+        # Sin costo para el cliente: solo se cuenta, como el reproceso de HU14.
+        orden.estado = Orden.Estado.EN_PROCESO
+        orden.numero_reprocesos += 1
+    elif decision == Novedad.Decision.ENTREGAR_CON_DESCUENTO:
+        gravedades = {g["novedad"]: g["gravedad"] for g in datos.get("gravedades", [])}
+        if sorted(gravedades) != sorted(n.pk for n in novedades):
+            raise serializers.ValidationError(
+                {"gravedades": "Indica la gravedad de cada prenda con novedad."}
+            )
+        for novedad in novedades:
+            gravedad = gravedades[novedad.pk]
+            porcentaje = configuracion.porcentaje_para(gravedad)
+            descuentos.append(aplicar_descuento(novedad, porcentaje, configuracion, gravedad))
+    elif decision == Novedad.Decision.REPROCESAR_CON_DESCUENTO:
+        operario = operario_para_reproceso(orden, datos.get("operario"))
+        if operario != orden.operario:
+            anterior = nombre_usuario(orden.operario) if orden.operario else "sin operario"
+            reasignacion = f"{anterior} → {nombre_usuario(operario)} (reproceso por novedad de la entrega)"
+            orden.operario = operario
+        for novedad in novedades:
+            descuentos.append(
+                aplicar_descuento(novedad, configuracion.porcentaje_reproceso, configuracion)
+            )
+        orden.estado = Orden.Estado.EN_PROCESO
+        orden.numero_reprocesos += 1
+
+    ahora = timezone.now()
+    for novedad in novedades:
+        novedad.decision = decision
+        novedad.decision_observacion = observacion
+        novedad.decidida_por = usuario
+        novedad.decidida_en = ahora
+        novedad.registrar_autoria(usuario)
+        novedad.save()
+    orden.aplicar_descuentos_por_incidencia()
+    orden.registrar_autoria(usuario)
+    orden.save()
+
+    detalle = f"{Novedad.Decision(decision).label}: {observacion}. "
+    if descuentos:
+        detalle += f"Descuentos: {'; '.join(descuentos)}. Nuevo total ${orden.valor_total}. "
+    if orden.estado != Orden.Estado.CON_NOVEDAD:
+        detalle += f"{Orden.Estado.CON_NOVEDAD} → {orden.estado}"
+    elif decision != Novedad.Decision.ENTREGAR_CON_DESCUENTO:
+        detalle += "La orden sigue Con novedad"
+    registrar_evento(orden, Evento.DECISION_NOVEDAD, usuario, detalle.strip())
+    if reasignacion:
+        registrar_evento(orden, Evento.REASIGNACION, usuario, reasignacion)
+
+
+class GravedadNovedadSerializer(serializers.Serializer):
+    novedad = serializers.IntegerField()
+    gravedad = serializers.ChoiceField(choices=Novedad.Gravedad.choices)
+
+
+class DecisionNovedadSerializer(serializers.Serializer):
+    decision = serializers.ChoiceField(choices=Novedad.Decision.choices)
+    observacion = serializers.CharField(
+        error_messages={
+            "required": "La observacion es obligatoria: con quien se hablo y que decidio.",
+            "blank": "La observacion es obligatoria: con quien se hablo y que decidio.",
+        }
+    )
+    gravedades = GravedadNovedadSerializer(many=True, required=False)
+    operario = serializers.PrimaryKeyRelatedField(
+        queryset=operarios_activos(),
+        required=False,
+        allow_null=True,
+        error_messages={
+            "does_not_exist": "Selecciona un operario activo.",
+            "incorrect_type": "Selecciona un operario activo.",
+        },
+    )
+
+
+class NovedadEntradaSerializer(serializers.Serializer):
+    prenda = serializers.IntegerField()
+    descripcion = serializers.CharField(
+        error_messages={
+            "required": "La descripcion es obligatoria.",
+            "blank": "La descripcion es obligatoria.",
+        }
+    )
+    foto = FotoField(
+        error_messages={
+            "required": "La fotografia es obligatoria.",
+            "blank": "La fotografia es obligatoria.",
+            "null": "La fotografia es obligatoria.",
+        }
+    )
+
+
+class NovedadSerializer(serializers.ModelSerializer):
+    prenda_nombre = serializers.CharField(source="prenda.__str__", read_only=True)
+    origen_nombre = serializers.CharField(source="get_origen_display", read_only=True)
+    usuario_nombre = serializers.SerializerMethodField()
+    foto_url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Novedad
+        fields = (
+            "id",
+            "orden",
+            "prenda",
+            "prenda_nombre",
+            "descripcion",
+            "origen",
+            "origen_nombre",
+            "estado_anterior",
+            "usuario_nombre",
+            "creado_en",
+            "foto_url",
+            "decision",
+            "decision_observacion",
+            "gravedad",
+            "porcentaje_descuento",
+            "monto_descuento",
+        )
+        read_only_fields = fields
+
+    def get_usuario_nombre(self, novedad) -> str | None:
+        return nombre_usuario(novedad.creado_por) if novedad.creado_por else None
+
+    def get_foto_url(self, novedad) -> str | None:
+        if not hasattr(novedad, "foto"):
+            return None
+        return reverse("novedad-foto", args=[novedad.pk])
+
+
+class CancelacionSerializer(serializers.Serializer):
+    motivo = serializers.CharField(
+        max_length=255,
+        error_messages={
+            "required": "Indica el motivo de la cancelacion.",
+            "blank": "Indica el motivo de la cancelacion.",
+            "null": "Indica el motivo de la cancelacion.",
+        },
+    )
+
+
+class ResultadoVerificacion(models.TextChoices):
+    COINCIDE = "coincide", "Coincide"
+    NOVEDAD = "novedad", "Novedad"
+    DANO = "dano", "Daño"
+    PERDIDA = "perdida", "Pérdida"
+
+
 class VerificacionPrendaSerializer(serializers.Serializer):
     prenda = serializers.IntegerField()
-    coincide = serializers.BooleanField()
+    resultado = serializers.ChoiceField(choices=ResultadoVerificacion.choices, required=False)
+    # Forma anterior a dano y perdida, que aun envia el frontend: coincide=false es una novedad.
+    coincide = serializers.BooleanField(required=False)
     observacion = serializers.CharField(required=False, allow_blank=True, default="")
+    foto = FotoField(required=False, allow_null=True, default=None)
+    valor_declarado = serializers.DecimalField(
+        max_digits=10, decimal_places=2, min_value=Decimal("1"), required=False, allow_null=True
+    )
 
     def validate(self, attrs):
-        attrs["observacion"] = attrs["observacion"].strip()
-        if not attrs["coincide"] and not attrs["observacion"]:
-            raise serializers.ValidationError(
-                {"observacion": "Es obligatoria cuando la prenda no coincide con lo solicitado."}
+        resultado = attrs.get("resultado")
+        if resultado is None:
+            if "coincide" not in attrs:
+                raise serializers.ValidationError({"resultado": "Indica el resultado de la prenda."})
+            resultado = (
+                ResultadoVerificacion.COINCIDE if attrs["coincide"] else ResultadoVerificacion.NOVEDAD
             )
+        attrs["resultado"] = resultado
+        attrs["observacion"] = attrs["observacion"].strip()
+        if resultado == ResultadoVerificacion.COINCIDE:
+            return attrs
+        faltan = {}
+        if not attrs["observacion"]:
+            faltan["observacion"] = "Es obligatoria cuando la prenda no coincide con lo solicitado."
+        if resultado == ResultadoVerificacion.PERDIDA:
+            if attrs["foto"] is not None:
+                faltan["foto"] = "Una prenda perdida no lleva foto."
+        elif attrs["foto"] is None:
+            faltan["foto"] = "La fotografia es obligatoria cuando la prenda no coincide."
+        if resultado in DanoPrenda.Tipo.values and not attrs.get("valor_declarado"):
+            faltan["valor_declarado"] = "Indica el valor de la prenda que declara el cliente."
+        if faltan:
+            raise serializers.ValidationError(faltan)
         return attrs
 
 
@@ -365,23 +701,63 @@ class EntregaSerializer(serializers.Serializer):
     )
 
     def verificar_contra(self, orden):
-        """Devuelve el detalle para el historial; exige cada prenda una sola vez."""
+        """Exige una vez cada prenda que sigue en la orden y separa novedades de danos.
+
+        Las prendas ya danadas o perdidas quedaron resueltas: no se vuelven a verificar.
+        """
         verificaciones = self.validated_data["prendas"]
-        registradas = {p.pk: p for p in orden.prendas.select_related("tipo_prenda", "material")}
+        registradas = {
+            p.pk: p
+            for p in orden.prendas.filter(dano__isnull=True).select_related("tipo_prenda", "material")
+        }
         if sorted(v["prenda"] for v in verificaciones) != sorted(registradas):
             raise serializers.ValidationError(
                 {"prendas": "Hay que verificar cada prenda de la orden, una sola vez."}
             )
-        discrepancias = [
-            f"{registradas[v['prenda']]}: {v['observacion']}"
-            for v in verificaciones
-            if not v["coincide"]
-        ]
-        detalle = f"{len(registradas)} prendas verificadas"
-        if discrepancias:
-            return f"{detalle}. Discrepancias: " + "; ".join(discrepancias)
-        return f"{detalle}, todas coinciden con lo solicitado"
+        novedades, danos = [], []
+        for v in verificaciones:
+            prenda = registradas[v["prenda"]]
+            if v["resultado"] == ResultadoVerificacion.NOVEDAD:
+                novedades.append((prenda, v["observacion"], v["foto"]))
+            elif v["resultado"] in DanoPrenda.Tipo.values:
+                danos.append((prenda, v["resultado"], v["observacion"], v["foto"], v["valor_declarado"]))
+        return novedades, danos
 
+
+def registrar_danos(orden, danos, usuario):
+    """Deja de cobrar el servicio de cada prenda danada o perdida y registra lo que se le debe al cliente."""
+    resumen = []
+    for prenda, tipo, descripcion, foto, valor_declarado in danos:
+        dano = DanoPrenda(
+            orden=orden,
+            prenda=prenda,
+            tipo=tipo,
+            descripcion=descripcion,
+            valor_declarado=valor_declarado,
+            valor_servicio=prenda.valor(),
+            operario=orden.operario,
+        )
+        dano.registrar_autoria(usuario)
+        dano.save()
+        if foto:
+            foto = FotoDano(dano=dano, **foto)
+            foto.registrar_autoria(usuario)
+            foto.save()
+        responsable = nombre_usuario(orden.operario) if orden.operario else "sin operario"
+        resumen.append(
+            f"{dano.get_tipo_display()} de {prenda}: {descripcion}. Servicio descontado "
+            f"${dano.valor_servicio}; valor de la prenda ${valor_declarado}, a pagar al cliente. "
+            f"Operario: {responsable}"
+        )
+    orden.aplicar_descuentos_por_incidencia()
+    orden.registrar_autoria(usuario)
+    orden.save()
+    registrar_evento(
+        orden,
+        Evento.DANO_PRENDA,
+        usuario,
+        "; ".join(resumen) + f". Nuevo total ${orden.valor_total}",
+    )
 
 
 class PrendaBandejaSerializer(serializers.ModelSerializer):
@@ -416,3 +792,145 @@ class OrdenBandejaSerializer(serializers.ModelSerializer):
         model = Orden
         fields = ("id", "codigo", "estado", "fecha_estimada_entrega", "prendas")
         read_only_fields = fields
+
+
+class ConsultaPublicaSerializer(serializers.ModelSerializer):
+    # Publica: sin cliente, montos ni id interno.
+    class Meta:
+        model = Orden
+        fields = ("codigo", "estado", "fecha_estimada_entrega")
+        read_only_fields = fields
+
+
+class OrdenHistorialClienteSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Orden
+        fields = ("id", "codigo", "creado_en", "estado", "valor_total", "estado_pago")
+        read_only_fields = fields
+
+
+class OrdenAlertaSerializer(serializers.ModelSerializer):
+    """`dias` es el retraso si la orden esta retrasada y lo que falta si esta proxima (0 = vence hoy)."""
+
+    cliente_nombre = serializers.CharField(source="cliente.nombre_completo", read_only=True)
+    tipo = serializers.SerializerMethodField()
+    dias = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Orden
+        fields = (
+            "id",
+            "codigo",
+            "cliente_nombre",
+            "estado",
+            "operario",
+            "fecha_estimada_entrega",
+            "tipo",
+            "dias",
+        )
+        read_only_fields = fields
+
+    def get_tipo(self, orden) -> str:
+        return "retrasada" if orden.fecha_estimada_entrega < self.context["hoy"] else "proxima"
+
+    def get_dias(self, orden) -> int:
+        return abs((orden.fecha_estimada_entrega - self.context["hoy"]).days)
+
+
+class OrdenConNovedadSerializer(serializers.ModelSerializer):
+    cliente_nombre = serializers.CharField(source="cliente.nombre_completo", read_only=True)
+    operario_nombre = serializers.SerializerMethodField()
+    novedades = NovedadSerializer(source="novedades_pendientes", many=True, read_only=True)
+
+    class Meta:
+        model = Orden
+        fields = ("id", "codigo", "cliente_nombre", "estado", "operario_nombre", "novedades")
+        read_only_fields = fields
+
+    def get_operario_nombre(self, orden) -> str | None:
+        return nombre_usuario(orden.operario) if orden.operario else None
+
+
+class ConfiguracionDescuentoNovedadSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ConfiguracionDescuentoNovedad
+        fields = (
+            "porcentaje_leve",
+            "porcentaje_moderada",
+            "porcentaje_notoria",
+            "porcentaje_reproceso",
+            "monto_minimo",
+            "tope_porcentaje",
+            "actualizado_en",
+        )
+        read_only_fields = ("actualizado_en",)
+
+    def validate(self, attrs):
+        leve, moderada, notoria = (
+            attrs.get(campo, getattr(self.instance, campo))
+            for campo in ("porcentaje_leve", "porcentaje_moderada", "porcentaje_notoria")
+        )
+        if not leve <= moderada <= notoria:
+            raise serializers.ValidationError(
+                "Los porcentajes deben ir de menor a mayor: leve, moderada y notoria."
+            )
+        return attrs
+
+
+class DanoPrendaSerializer(serializers.ModelSerializer):
+    orden_codigo = serializers.CharField(source="orden.codigo", read_only=True)
+    cliente_nombre = serializers.CharField(source="orden.cliente.nombre_completo", read_only=True)
+    prenda_nombre = serializers.CharField(source="prenda.__str__", read_only=True)
+    tipo_nombre = serializers.CharField(source="get_tipo_display", read_only=True)
+    estado_nombre = serializers.CharField(source="get_estado_display", read_only=True)
+    operario_nombre = serializers.SerializerMethodField()
+    registrado_por_nombre = serializers.SerializerMethodField()
+    pagado_por_nombre = serializers.SerializerMethodField()
+    foto_url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = DanoPrenda
+        fields = (
+            "id",
+            "orden",
+            "orden_codigo",
+            "cliente_nombre",
+            "prenda",
+            "prenda_nombre",
+            "tipo",
+            "tipo_nombre",
+            "descripcion",
+            "valor_declarado",
+            "valor_servicio",
+            "operario_nombre",
+            "registrado_por_nombre",
+            "creado_en",
+            "estado",
+            "estado_nombre",
+            "pagado_por_nombre",
+            "pagado_en",
+            "observacion_pago",
+            "foto_url",
+        )
+        read_only_fields = fields
+
+    def get_operario_nombre(self, dano) -> str | None:
+        return nombre_usuario(dano.operario) if dano.operario else None
+
+    def get_registrado_por_nombre(self, dano) -> str | None:
+        return nombre_usuario(dano.creado_por) if dano.creado_por else None
+
+    def get_pagado_por_nombre(self, dano) -> str | None:
+        return nombre_usuario(dano.pagado_por) if dano.pagado_por else None
+
+    def get_foto_url(self, dano) -> str | None:
+        return reverse("dano-foto", args=[dano.pk]) if hasattr(dano, "foto") else None
+
+
+class PagoDanoSerializer(serializers.Serializer):
+    observacion = serializers.CharField(
+        error_messages={
+            "required": "Indica como se le pago al cliente.",
+            "blank": "Indica como se le pago al cliente.",
+        }
+    )
