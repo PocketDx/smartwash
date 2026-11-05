@@ -511,6 +511,7 @@ export type Orden = {
   pago_completo: boolean;
   /** Lo pagado de mas por los descuentos; se devuelve al entregar. */
   saldo_a_favor: string;
+  motivo_cancelacion: string;
 };
 
 /** Una linea de prenda tal como la recibe POST /ordenes y POST /ordenes/{id}/prendas. */
@@ -763,6 +764,13 @@ export type Operario = { id: number; username: string; nombre: string };
 
 export async function getOperarios(cookieStore: CookieStore): Promise<Operario[] | null> {
   return fetchBackend<Operario[]>("/operarios", cookieStore);
+}
+
+/** HU13: solo recepcionista o administrador, y antes de iniciar el servicio,
+ * salvo una orden "Con novedad" cuyo cliente decidio no continuar. Si hay pagos,
+ * la devolucion queda en el historial; los pagos no se tocan. */
+export async function cancelarOrden(id: number, motivo: string): Promise<Response> {
+  return api(`/ordenes/${id}/cancelacion`, { method: "POST", body: { motivo } });
 }
 
 /** Asigna o reasigna la orden (HU10). El backend valida el rol, el abono, que
