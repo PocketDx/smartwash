@@ -670,10 +670,12 @@ export type Novedad = {
   monto_descuento: string;
 };
 
-/** Las del proceso: continuar, reprocesar o no_continuar. Las de la entrega:
- * entregar_con_descuento o reprocesar_con_descuento (HU19). */
+/** Las del proceso: continuar o agregar_servicio (reprocesar y no_continuar solo
+ * aparecen en decisiones viejas). Las de la entrega: entregar_con_descuento o
+ * reprocesar_con_descuento (HU19). */
 export type DecisionNovedad =
   | "continuar"
+  | "agregar_servicio"
   | "reprocesar"
   | "no_continuar"
   | "entregar_con_descuento"
@@ -686,6 +688,8 @@ export type DecisionFormulario = {
   observacion: string;
   gravedades?: { novedad: number; gravedad: Gravedad }[];
   operario?: number | null;
+  /** Solo con agregar_servicio, y solo para las prendas con novedad. */
+  servicios?: { prenda: number; servicio: number }[];
 };
 
 /** Una sola decision resuelve todas las novedades pendientes de la orden.
