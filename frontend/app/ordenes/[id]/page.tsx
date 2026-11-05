@@ -31,6 +31,7 @@ import AgregarServicio from "./agregar-servicio";
 import AsignarOperario from "./asignar-operario";
 import AvisoCliente from "./aviso-cliente";
 import CambiarEstado from "./cambiar-estado";
+import CancelarOrden from "./cancelar-orden";
 import DecisionEntrega from "./decision-entrega";
 import DecisionProceso from "./decision-proceso";
 import NovedadesOrden from "./novedades-orden";
@@ -139,6 +140,13 @@ export default async function OrdenPage({
         </div>
       )}
 
+      {orden.estado === "Cancelada" && (
+        <div role="status" className="clay-sm mb-6 border-l-8 border-l-(--sw-coral) p-4 text-sm">
+          <p className="font-semibold text-(--sw-ink)">Orden cancelada</p>
+          <p className="mt-1 text-(--sw-ink-soft)">Motivo: {orden.motivo_cancelacion}</p>
+        </div>
+      )}
+
       {historial && <AvisoCliente orden={orden} historial={historial} />}
       {puedeEditar && orden.estado === "Lista para entrega" && <RegistrarEntrega orden={orden} />}
       <CambiarEstado orden={orden} usuario={user} />
@@ -151,6 +159,7 @@ export default async function OrdenPage({
       <RegistrarNovedad orden={orden} usuario={user} />
       {novedades && <NovedadesOrden novedades={novedades} />}
       {puedeEditar && <AsignarOperario orden={orden} operarios={operarios} usuario={user} />}
+      {puedeEditar && <CancelarOrden orden={orden} novedades={novedades} />}
 
       <ClayCard className="mb-6">
         <dl className="grid grid-cols-2 gap-5 sm:grid-cols-4">
