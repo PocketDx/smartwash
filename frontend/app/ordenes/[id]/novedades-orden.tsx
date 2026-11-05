@@ -1,3 +1,5 @@
+import type { ReactNode } from "react";
+
 import type { Novedad } from "@/lib/api";
 import { FECHA_LEGIBLE } from "@/lib/auditoria";
 import { formatCOP } from "@/lib/format";
@@ -11,12 +13,20 @@ const DECISION: Record<NonNullable<Novedad["decision"]>, string> = {
   reprocesar_con_descuento: "Reprocesar con descuento",
 };
 
-export default function NovedadesOrden({ novedades }: { novedades: Novedad[] }) {
+export default function NovedadesOrden({
+  novedades,
+  encabezado,
+  children,
+}: {
+  novedades: Novedad[];
+  encabezado?: ReactNode;
+  children?: ReactNode;
+}) {
   if (novedades.length === 0) return null;
 
   return (
     <ClayCard className="mb-6">
-      <h2 className="text-lg font-bold text-(--sw-ink)">Novedades</h2>
+      {encabezado ?? <h2 className="text-lg font-bold text-(--sw-ink)">Novedades</h2>}
       <ul className="mt-3 flex flex-col gap-4">
         {novedades.map((n) => (
           <li key={n.id} className="flex flex-wrap gap-4 border-t border-(--sw-hairline) pt-3">
@@ -43,7 +53,7 @@ export default function NovedadesOrden({ novedades }: { novedades: Novedad[] }) 
               </p>
               <div className="mt-2">
                 {n.decision ? (
-                  <ClayBadge color="mint">
+                  <ClayBadge color={n.decision === "no_continuar" ? "peach" : "mint"}>
                     Decision del cliente: {DECISION[n.decision]}
                     {Number(n.monto_descuento) > 0 &&
                       ` · ${n.gravedad ? `${n.gravedad} ` : ""}${Number(n.porcentaje_descuento)} % (− ${formatCOP(n.monto_descuento)})`}
@@ -56,6 +66,7 @@ export default function NovedadesOrden({ novedades }: { novedades: Novedad[] }) 
           </li>
         ))}
       </ul>
+      {children}
     </ClayCard>
   );
 }

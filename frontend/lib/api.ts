@@ -140,13 +140,20 @@ export type Cliente = {
   documento: string;
   telefono: string;
   correo: string;
+  /** Solo lectura: la clasificacion la recalcula el backend al entregar (HU25)
+   * y los puntos los suma la entrega de la orden (HU26). */
   clasificacion: "Ocasional" | "Frecuente" | "VIP";
+  puntos: number;
 };
 
-export type ClienteFormulario = Omit<Cliente, "id" | "clasificacion">;
+export type ClienteFormulario = Omit<Cliente, "id" | "clasificacion" | "puntos">;
 
 export async function getClientes(cookieStore: CookieStore): Promise<Cliente[] | null> {
   return fetchBackend<Cliente[]>("/clientes", cookieStore);
+}
+
+export async function getCliente(id: number, cookieStore: CookieStore): Promise<Cliente | null> {
+  return fetchBackend<Cliente>(`/clientes/${id}`, cookieStore);
 }
 
 export async function crearCliente(datos: ClienteFormulario): Promise<Response> {
@@ -714,6 +721,21 @@ export async function actualizarConfiguracionDescuentos(
   datos: Omit<ConfiguracionDescuentos, "actualizado_en">,
 ): Promise<Response> {
   return api("/ordenes/descuentos-novedad", { method: "PATCH", body: datos });
+}
+
+/** GET /ordenes/novedades: solo recepcionista y administrador. Cada orden trae
+ * solo sus novedades pendientes, incluidas las que el cliente decidio no continuar. */
+export type OrdenConNovedad = {
+  id: number;
+  codigo: string;
+  cliente_nombre: string;
+  estado: EstadoOrden;
+  operario_nombre: string | null;
+  novedades: Novedad[];
+};
+
+export async function getOrdenesConNovedad(cookieStore: CookieStore): Promise<OrdenConNovedad[] | null> {
+  return fetchBackend<OrdenConNovedad[]>("/ordenes/novedades", cookieStore);
 }
 
 export async function getNovedadesOrden(id: number, cookieStore: CookieStore): Promise<Novedad[] | null> {

@@ -4,6 +4,7 @@ import { redirect } from "next/navigation";
 import type { ReactNode } from "react";
 
 import {
+  getCliente,
   getConfiguracionDescuentos,
   getCurrentUser,
   getHistorialOrden,
@@ -19,6 +20,7 @@ import {
   type TipoDano,
 } from "@/lib/api";
 import { formatCOP, formatFecha } from "@/lib/format";
+import { BadgeClasificacion } from "../../clientes/clasificacion";
 import { ClayBadge, ClayCard, Encabezado } from "../../components/ui/clay";
 import EstadoAbono from "../abono";
 import { tarifasDeHoy } from "../cotizacion";
@@ -30,6 +32,7 @@ import AsignarOperario from "./asignar-operario";
 import AvisoCliente from "./aviso-cliente";
 import CambiarEstado from "./cambiar-estado";
 import DecisionEntrega from "./decision-entrega";
+import DecisionProceso from "./decision-proceso";
 import NovedadesOrden from "./novedades-orden";
 import PagosOrden from "./pagos-orden";
 import RegistrarEntrega from "./registrar-entrega";
@@ -90,6 +93,7 @@ export default async function OrdenPage({
     );
   }
 
+  const cliente = puedeEditar ? await getCliente(orden.cliente, cookieStore) : null;
   const tarifasVigentes = tarifas ? tarifasDeHoy(tarifas) : [];
   const admiteLineas = puedeEditar && ESTADOS_QUE_ADMITEN_LINEAS.includes(orden.estado);
   const conCatalogo = admiteLineas && tiposPrenda !== null && materiales !== null && servicios !== null;
@@ -117,6 +121,12 @@ export default async function OrdenPage({
         }
       >
         {orden.cliente_nombre}
+        {cliente && (
+          <>
+            {" "}
+            <BadgeClasificacion clasificacion={cliente.clasificacion} />
+          </>
+        )}
       </Encabezado>
 
       {registrada && (
@@ -134,6 +144,9 @@ export default async function OrdenPage({
       <CambiarEstado orden={orden} usuario={user} />
       {puedeEditar && orden.estado === "Con novedad" && novedades && configuracion && (
         <DecisionEntrega orden={orden} novedades={novedades} operarios={operarios} configuracion={configuracion} />
+      )}
+      {puedeEditar && orden.estado === "Con novedad" && novedades && (
+        <DecisionProceso ordenId={orden.id} novedades={novedades} />
       )}
       <RegistrarNovedad orden={orden} usuario={user} />
       {novedades && <NovedadesOrden novedades={novedades} />}

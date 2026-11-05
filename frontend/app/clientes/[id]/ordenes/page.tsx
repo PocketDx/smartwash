@@ -2,11 +2,12 @@ import { cookies } from "next/headers";
 import Link from "next/link";
 import { redirect } from "next/navigation";
 
-import { getCurrentUser, getHistorialCliente } from "@/lib/api";
+import { getCliente, getCurrentUser, getHistorialCliente } from "@/lib/api";
 import { FECHA_LEGIBLE } from "@/lib/auditoria";
 import { formatCOP } from "@/lib/format";
 import { ClayBadge, ClayCard, Encabezado } from "../../../components/ui/clay";
 import { COLOR_ESTADO } from "../../../ordenes/tabla-ordenes";
+import { BadgeClasificacion, ReglasClasificacion } from "../../clasificacion";
 
 export default async function HistorialClientePage({ params }: { params: Promise<{ id: string }> }) {
   const cookieStore = await cookies();
@@ -14,7 +15,8 @@ export default async function HistorialClientePage({ params }: { params: Promise
   if (!user) redirect("/login");
   if (user.rol === "operario") redirect("/");
 
-  const historial = await getHistorialCliente(Number((await params).id), cookieStore);
+  const id = Number((await params).id);
+  const [historial, cliente] = await Promise.all([getHistorialCliente(id, cookieStore), getCliente(id, cookieStore)]);
 
   return (
     <main className="mx-auto max-w-5xl px-4 py-8 sm:px-8 sm:py-12">
@@ -31,10 +33,14 @@ export default async function HistorialClientePage({ params }: { params: Promise
         </ClayCard>
       ) : (
         <>
-          <Encabezado eyebrow="Clientes · Historial de ordenes" titulo={historial.cliente.nombre_completo} />
+          <Encabezado
+            eyebrow="Clientes · Historial de ordenes"
+            titulo={historial.cliente.nombre_completo}
+            acciones={cliente && <BadgeClasificacion clasificacion={cliente.clasificacion} />}
+          />
 
           <ClayCard className="mb-6">
-            <dl className="grid grid-cols-2 gap-5">
+            <dl className="grid grid-cols-2 gap-5 sm:grid-cols-3">
               <div>
                 <dt className="text-xs font-semibold tracking-wide text-(--sw-ink-soft) uppercase">Ordenes</dt>
                 <dd className="mt-1 text-2xl font-bold text-(--sw-ink) tabular-nums">{historial.numero_ordenes}</dd>
@@ -47,10 +53,22 @@ export default async function HistorialClientePage({ params }: { params: Promise
                   {formatCOP(historial.total_comprado)}
                 </dd>
               </div>
+              {cliente && (
+                <div>
+                  <dt className="text-xs font-semibold tracking-wide text-(--sw-ink-soft) uppercase">
+                    Saldo de puntos
+                  </dt>
+                  <dd className="mt-1 text-2xl font-bold text-(--sw-ink) tabular-nums">{cliente.puntos}</dd>
+                </div>
+              )}
             </dl>
             <p className="mt-3 text-xs text-(--sw-ink-soft)">
-              El total comprado no incluye las ordenes canceladas.
+              El total comprado no incluye las ordenes canceladas. Los puntos se suman solos al entregar cada
+              orden.
             </p>
+            <div className="mt-1">
+              <ReglasClasificacion />
+            </div>
           </ClayCard>
 
           {historial.ordenes.length === 0 ? (
