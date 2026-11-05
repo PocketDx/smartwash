@@ -845,16 +845,16 @@ export async function registrarPago(id: number, monto: string, metodo: MetodoPag
  * backend/ordenes/models.py). No hay rol "cliente" en accounts.User, asi que
  * el seguimiento del pedido es publico por codigo en vez de requerir login. */
 
+/** GET /ordenes/consulta/{codigo} (HU17): sin datos del cliente ni montos. La
+ * busqueda es exacta; un codigo que no existe responde 404 con su mensaje. */
 export type SeguimientoOrden = {
   codigo: string;
   estado: EstadoOrden;
   fecha_estimada_entrega: string | null;
-  fecha_entrega: string | null;
 };
 
-export async function rastrearOrden(codigo: string): Promise<SeguimientoOrden | null> {
-  const response = await api(`/ordenes/rastrear?codigo=${encodeURIComponent(codigo)}`);
-  return response.ok ? ((await response.json()) as SeguimientoOrden) : null;
+export async function rastrearOrden(codigo: string): Promise<Response> {
+  return api(`/ordenes/consulta/${encodeURIComponent(codigo)}`);
 }
 
 /* ------------------------------------- PQRS (EP06, publico) ------------------------------------- */
