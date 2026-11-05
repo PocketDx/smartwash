@@ -7,6 +7,7 @@ import { ClayBadge, ClayCard } from "../../components/ui/clay";
 
 const DECISION: Record<NonNullable<Novedad["decision"]>, string> = {
   continuar: "Continuar igual",
+  agregar_servicio: "Agregar servicio",
   reprocesar: "Reprocesar",
   no_continuar: "No continuar",
   entregar_con_descuento: "Entregar con descuento",

@@ -11,6 +11,7 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import IntegrityError, OperationalError, transaction
 from django.db.models import ProtectedError
 from django.test import TestCase, TransactionTestCase, override_settings
+from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 from rest_framework.test import APITestCase
 
@@ -2275,41 +2276,69 @@ class DecisionNovedadApiTests(OrdenEnProcesoMixin, APITestCase):
         self.assertIn("Continuar igual: Hable con Ana por telefono", evento.detalle)
         self.assertIn("→ Control de calidad", evento.detalle)
 
-    def test_reprocesar_una_novedad_del_proceso_cuenta_el_reproceso_sin_costo_ni_descuento(self):
+    def agregar(self, *servicios, prenda=None, usuario=None):
+        prenda = prenda or self.camisa_1
+        return self.decidir(
+            Novedad.Decision.AGREGAR_SERVICIO,
+            "Ana pide lavarla tambien",
+            usuario=usuario,
+            servicios=[{"prenda": prenda.pk, "servicio": s.pk} for s in servicios],
+        )
+
+    def test_agregar_servicio_suma_al_total_y_al_saldo_y_corre_la_fecha_desde_hoy(self):
         Orden.objects.filter(pk=self.orden.pk).update(estado=Orden.Estado.CONTROL_CALIDAD)
         self.registrar_novedad()
         self.orden.refresh_from_db()
-        total = self.orden.valor_total
+        total, abono = self.orden.valor_total, self.orden.abono_requerido
 
-        response = self.decidir(Novedad.Decision.REPROCESAR, usuario=self.admin)
+        response = self.agregar(self.lavado, usuario=self.admin)
 
         self.assertEqual(response.status_code, 200, response.json())
         self.orden.refresh_from_db()
+        linea = self.camisa_1.servicios.get(tarifa__servicio=self.lavado)
+        self.assertEqual(self.orden.valor_total, total + linea.valor_aplicado)
+        self.assertEqual(self.orden.saldo_pendiente(), self.orden.valor_total)
+        self.assertEqual(self.orden.abono_requerido, abono)
+        self.assertEqual(self.orden.estado, Orden.Estado.EN_PROCESO)
+        self.assertEqual(self.orden.duracion_estimada_dias, 2)
         self.assertEqual(
-            (self.orden.estado, self.orden.numero_reprocesos, self.orden.valor_total),
-            (Orden.Estado.EN_PROCESO, 1, total),
+            self.orden.fecha_estimada_entrega, sumar_dias_habiles(timezone.localdate(), 2)
         )
-        self.assertIn("Reprocesar", self.ultimo_evento().detalle)
+        self.assertEqual(Novedad.objects.get().decision, Novedad.Decision.AGREGAR_SERVICIO)
+        detalle = self.ultimo_evento().detalle
+        self.assertIn("Agregar servicio: Ana pide lavarla tambien", detalle)
+        self.assertIn(f"Nuevo total ${int(self.orden.valor_total)}", detalle)
+        self.assertIn("→ En proceso", detalle)
 
-    def test_no_continuar_deja_la_orden_con_novedad_y_admite_otra_decision(self):
+    def test_agregar_servicio_exige_un_servicio_nuevo_para_la_prenda_con_novedad(self):
         self.registrar_novedad()
+        casos = {
+            "Elige al menos un servicio": self.agregar(),
+            "Solo se agregan servicios a la prenda con novedad": self.agregar(
+                self.lavado, prenda=self.camisa_2
+            ),
+            "ya tiene": self.agregar(self.planchado),
+        }
 
-        response = self.decidir(Novedad.Decision.NO_CONTINUAR, "Ana no quiere seguir")
-
-        self.assertEqual(response.status_code, 200)
+        for mensaje, response in casos.items():
+            with self.subTest(mensaje=mensaje):
+                self.assertEqual(response.status_code, 400)
+                self.assertIn(mensaje, str(response.json()))
         self.orden.refresh_from_db()
         self.assertEqual(self.orden.estado, Orden.Estado.CON_NOVEDAD)
-        self.assertIn("La orden sigue Con novedad", self.ultimo_evento().detalle)
-        lista = self.client.get(self.url_lista).json()
-        self.assertEqual(lista[0]["novedades"][0]["decision"], Novedad.Decision.NO_CONTINUAR)
+        self.assertFalse(OrdenServicio.objects.filter(tarifa__servicio=self.lavado).exists())
 
-        self.decidir(Novedad.Decision.CONTINUAR, "Ana cambio de opinion")
+    def test_la_novedad_del_proceso_ya_no_admite_reprocesar_ni_no_continuar(self):
+        self.registrar_novedad()
 
+        for decision in (Novedad.Decision.REPROCESAR, Novedad.Decision.NO_CONTINUAR):
+            with self.subTest(decision=decision):
+                response = self.decidir(decision)
+
+                self.assertEqual(response.status_code, 400)
+                self.assertIn('"Continuar igual", "Agregar servicio"', str(response.json()))
         self.orden.refresh_from_db()
-        self.assertEqual(self.orden.estado, Orden.Estado.EN_PROCESO)
-        self.assertEqual(
-            self.orden.historial.filter(tipo_evento=Evento.DECISION_NOVEDAD).count(), 2
-        )
+        self.assertEqual(self.orden.estado, Orden.Estado.CON_NOVEDAD)
 
     def test_sin_observacion_se_rechaza(self):
         self.registrar_novedad()
@@ -2342,14 +2371,13 @@ class DecisionNovedadApiTests(OrdenEnProcesoMixin, APITestCase):
         with mock.patch(
             "ordenes.serializers.registrar_evento", side_effect=OperationalError("sin conexion")
         ), self.assertLogs("ordenes.historial", level="ERROR") as logs:
-            response = self.decidir(Novedad.Decision.REPROCESAR)
+            response = self.agregar(self.lavado)
 
         self.assertEqual(response.status_code, 503)
         self.assertIn("sin conexion", "\n".join(logs.output))
         self.orden.refresh_from_db()
-        self.assertEqual(
-            (self.orden.estado, self.orden.numero_reprocesos), (Orden.Estado.CON_NOVEDAD, 0)
-        )
+        self.assertEqual(self.orden.estado, Orden.Estado.CON_NOVEDAD)
+        self.assertFalse(OrdenServicio.objects.filter(tarifa__servicio=self.lavado).exists())
         self.assertIsNone(Novedad.objects.get().decision)
 
 
@@ -2782,7 +2810,8 @@ class CancelarOrdenConNovedadApiTests(OrdenEnProcesoMixin, APITestCase):
             f"/api/ordenes/{self.orden.pk}/pagos", {"monto": "5000", "metodo": "efectivo"}, format="json"
         )
         self.registrar_novedad()
-        self.decidir(Novedad.Decision.NO_CONTINUAR)
+        # "No continuar" ya no se ofrece, pero las ordenes que lo registraron antes siguen cancelables.
+        Novedad.objects.filter(orden=self.orden).update(decision=Novedad.Decision.NO_CONTINUAR)
 
         for usuario in (self.recepcionista, self.admin):
             with self.subTest(usuario=usuario.username):
@@ -2817,17 +2846,14 @@ class CancelarOrdenConNovedadApiTests(OrdenEnProcesoMixin, APITestCase):
         self.assertEqual(self.orden.estado, Orden.Estado.CON_NOVEDAD)
         self.assertFalse(self.orden.historial.filter(tipo_evento=Evento.CANCELACION).exists())
 
-    def test_rechaza_cancelar_si_el_cliente_decidio_continuar_o_reprocesar(self):
-        for decision in (Novedad.Decision.CONTINUAR, Novedad.Decision.REPROCESAR):
-            with self.subTest(decision=decision):
-                Orden.objects.filter(pk=self.orden.pk).update(estado=Orden.Estado.EN_PROCESO)
-                self.registrar_novedad()
-                self.decidir(decision)
+    def test_rechaza_cancelar_si_el_cliente_decidio_continuar(self):
+        self.registrar_novedad()
+        self.decidir(Novedad.Decision.CONTINUAR)
 
-                response = self.cancelar()
+        response = self.cancelar()
 
-                self.assertEqual(response.status_code, 400)
-                self.assertIn("el servicio ya inicio", str(response.json()))
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("el servicio ya inicio", str(response.json()))
 
         self.assertFalse(self.orden.historial.filter(tipo_evento=Evento.CANCELACION).exists())
 
