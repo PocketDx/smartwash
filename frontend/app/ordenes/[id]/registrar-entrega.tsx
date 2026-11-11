@@ -208,7 +208,7 @@ export default function RegistrarEntrega({ orden }: { orden: Orden }) {
                   <ClayInput
                     type="number"
                     min="1"
-                    step="100"
+                    step="1"
                     inputMode="numeric"
                     value={revision.valor}
                     onChange={(e) => revisar(prenda.id, { valor: e.target.value })}
