@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useRef, useState } from "react";
 
 import { AlertaErrores } from "@/app/catalogo/errores";
 import { cambiarEstadoOrden, type EstadoOrden, type Orden, type User } from "@/lib/api";
@@ -37,9 +37,10 @@ function puedeHacer(paso: Paso, orden: Orden, usuario: User): boolean {
 
 export default function CambiarEstado({ orden, usuario }: { orden: Orden; usuario: User }) {
   const router = useRouter();
-  const [elegido, setElegido] = useState<Paso | null>(null);
+  const [elegidoGuardado, setElegido] = useState<Paso | null>(null);
   const [errores, setErrores] = useState<string[]>([]);
   const [pending, setPending] = useState(false);
+  const enviando = useRef(false);
 
   if (orden.estado === "Con novedad") {
     return (
@@ -64,6 +65,8 @@ export default function CambiarEstado({ orden, usuario }: { orden: Orden; usuari
   }
 
   const pasos = PASOS[orden.estado] ?? [];
+  // La orden pudo cambiar de estado (doble clic, otra pestana): solo vale un paso del estado actual.
+  const elegido = pasos.find((p) => p.destino === elegidoGuardado?.destino) ?? null;
   const disponibles = pasos.filter((paso) => puedeHacer(paso, orden, usuario));
   if (pasos.length === 0) return null;
 
@@ -90,10 +93,12 @@ export default function CambiarEstado({ orden, usuario }: { orden: Orden; usuari
   const avisa = elegido?.destino === "Lista para entrega";
 
   async function confirmar() {
-    if (!elegido) return;
+    if (!elegido || enviando.current) return;
+    enviando.current = true;
     setPending(true);
     setErrores([]);
     const response = await cambiarEstadoOrden(orden.id, elegido.destino).catch(() => null);
+    enviando.current = false;
     setPending(false);
 
     if (response?.ok) {
