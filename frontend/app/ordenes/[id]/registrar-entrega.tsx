@@ -165,7 +165,12 @@ export default function RegistrarEntrega({ orden }: { orden: Orden }) {
                       name={nombre}
                       checked={resultado === opcion.valor}
                       onChange={() =>
-                        revisar(prenda.id, opcion.valor === "coincide" ? vacia() : { resultado: opcion.valor })
+                        revisar(
+                          prenda.id,
+                          opcion.valor === "coincide"
+                            ? { ...vacia(), resultado: "coincide" }
+                            : { resultado: opcion.valor },
+                        )
                       }
                       required={i === 0}
                     />
