@@ -484,6 +484,9 @@ export type PrendaDeOrden = {
   dano: TipoDano | null;
   /** Unidades de la linea danadas o perdidas; las demas se entregaron y se cobraron. */
   dano_cantidad: number | null;
+  dano_valor_unitario_declarado: string | null;
+  /** Lo que se le debe al cliente por esas unidades. */
+  dano_valor_declarado: string | null;
 };
 
 /** Lo que devuelve OrdenSerializer. Los montos llegan como texto decimal. */
@@ -639,7 +642,8 @@ export type VerificacionPrenda = {
   resultado: ResultadoVerificacion;
   observacion: string;
   foto: string | null;
-  valor_declarado: string | null;
+  /** Valor de UNA unidad; el total que se le debe al cliente lo calcula el backend. */
+  valor_unitario_declarado: string | null;
   /** Solo con dano o perdida: unidades de la linea afectadas (1 a su cantidad). */
   cantidad_afectada: number | null;
 };
@@ -789,8 +793,9 @@ export async function asignarOperario(id: number, operario: number): Promise<Res
 
 /* ------------------------------- Danos y perdidas de prendas (HU19) ------------------------------- */
 
-/** `valor_declarado` es lo que la lavanderia le debe al cliente y no toca el
- * total de la orden; `valor_servicio` es lo que se dejo de cobrar. */
+/** `valor_declarado` es lo que la lavanderia le debe al cliente (valor de una
+ * unidad x unidades afectadas) y no toca el total de la orden; `valor_servicio`
+ * es lo que se dejo de cobrar. */
 export type DanoPrenda = {
   id: number;
   orden: number;
@@ -803,6 +808,8 @@ export type DanoPrenda = {
   tipo: TipoDano;
   tipo_nombre: string;
   descripcion: string;
+  valor_unitario_declarado: string;
+  /** Total que se le debe al cliente: valor_unitario_declarado x cantidad_afectada. */
   valor_declarado: string;
   valor_servicio: string;
   operario_nombre: string | null;

@@ -633,7 +633,8 @@ class DanoPrenda(ModeloConAutoria):
     """Prenda que la lavanderia dano o perdio (HU19).
 
     valor_servicio es lo que se deja de cobrar en la orden; valor_declarado es
-    lo que la lavanderia le debe al cliente por la prenda, y no toca el total.
+    lo que la lavanderia le debe al cliente (valor de una unidad x unidades
+    afectadas), y no toca el total.
     """
 
     class Tipo(models.TextChoices):
@@ -650,6 +651,7 @@ class DanoPrenda(ModeloConAutoria):
     # Unidades de la linea afectadas; solo esas dejan de cobrarse (valor_servicio).
     cantidad_afectada = models.PositiveIntegerField(default=1)
     descripcion = models.TextField()
+    valor_unitario_declarado = models.DecimalField(max_digits=10, decimal_places=2)
     valor_declarado = models.DecimalField(max_digits=10, decimal_places=2)
     valor_servicio = models.DecimalField(max_digits=10, decimal_places=2)
     operario = models.ForeignKey(
@@ -677,6 +679,10 @@ class DanoPrenda(ModeloConAutoria):
         constraints = [
             models.CheckConstraint(
                 condition=models.Q(valor_declarado__gt=0), name="dano_valor_declarado_positivo"
+            ),
+            models.CheckConstraint(
+                condition=models.Q(valor_unitario_declarado__gt=0),
+                name="dano_valor_unitario_declarado_positivo",
             ),
             models.CheckConstraint(
                 condition=models.Q(cantidad_afectada__gt=0), name="dano_cantidad_afectada_positiva"

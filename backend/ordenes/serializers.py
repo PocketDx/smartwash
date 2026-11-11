@@ -187,6 +187,8 @@ class PrendaSerializer(serializers.ModelSerializer):
     servicios = OrdenServicioSerializer(many=True, read_only=True)
     dano = serializers.SerializerMethodField()
     dano_cantidad = serializers.SerializerMethodField()
+    dano_valor_unitario_declarado = serializers.SerializerMethodField()
+    dano_valor_declarado = serializers.SerializerMethodField()
 
     class Meta:
         model = Prenda
@@ -205,6 +207,8 @@ class PrendaSerializer(serializers.ModelSerializer):
             "servicios",
             "dano",
             "dano_cantidad",
+            "dano_valor_unitario_declarado",
+            "dano_valor_declarado",
         )
 
     def get_dano(self, prenda) -> str | None:
@@ -212,6 +216,13 @@ class PrendaSerializer(serializers.ModelSerializer):
 
     def get_dano_cantidad(self, prenda) -> int | None:
         return prenda.dano.cantidad_afectada if hasattr(prenda, "dano") else None
+
+    # Como texto, igual que los DecimalField de la API.
+    def get_dano_valor_unitario_declarado(self, prenda) -> str | None:
+        return str(prenda.dano.valor_unitario_declarado) if hasattr(prenda, "dano") else None
+
+    def get_dano_valor_declarado(self, prenda) -> str | None:
+        return str(prenda.dano.valor_declarado) if hasattr(prenda, "dano") else None
 
 
 class OrdenSerializer(serializers.ModelSerializer):
@@ -713,8 +724,9 @@ class VerificacionPrendaSerializer(serializers.Serializer):
     coincide = serializers.BooleanField(required=False)
     observacion = serializers.CharField(required=False, allow_blank=True, default="")
     foto = FotoField(required=False, allow_null=True, default=None)
-    valor_declarado = serializers.DecimalField(
-        max_digits=10, decimal_places=2, min_value=Decimal("1"), required=False, allow_null=True
+    # El total que se le debe al cliente lo calcula el backend; un valor_declarado enviado se ignora.
+    valor_unitario_declarado = serializers.DecimalField(
+        max_digits=10, decimal_places=2, required=False, allow_null=True
     )
     # Solo para dano o perdida; sin ella se toma la linea completa.
     cantidad_afectada = serializers.IntegerField(min_value=1, required=False, allow_null=True)
@@ -739,8 +751,12 @@ class VerificacionPrendaSerializer(serializers.Serializer):
                 faltan["foto"] = "Una prenda perdida no lleva foto."
         elif attrs["foto"] is None:
             faltan["foto"] = "La fotografia es obligatoria cuando la prenda no coincide."
-        if resultado in DanoPrenda.Tipo.values and not attrs.get("valor_declarado"):
-            faltan["valor_declarado"] = "Indica el valor de la prenda que declara el cliente."
+        if resultado in DanoPrenda.Tipo.values:
+            valor = attrs.get("valor_unitario_declarado")
+            if valor is None:
+                faltan["valor_unitario_declarado"] = "Indica el valor de una unidad que declara el cliente."
+            elif valor <= 0:
+                faltan["valor_unitario_declarado"] = "El valor de una unidad debe ser mayor que 0."
         if faltan:
             raise serializers.ValidationError(faltan)
         return attrs
@@ -782,7 +798,14 @@ class EntregaSerializer(serializers.Serializer):
                         }
                     )
                 danos.append(
-                    (prenda, v["resultado"], v["observacion"], v["foto"], v["valor_declarado"], cantidad)
+                    (
+                        prenda,
+                        v["resultado"],
+                        v["observacion"],
+                        v["foto"],
+                        v["valor_unitario_declarado"],
+                        cantidad,
+                    )
                 )
         return novedades, danos
 
@@ -790,14 +813,15 @@ class EntregaSerializer(serializers.Serializer):
 def registrar_danos(orden, danos, usuario):
     """Deja de cobrar el servicio de cada prenda danada o perdida y registra lo que se le debe al cliente."""
     resumen = []
-    for prenda, tipo, descripcion, foto, valor_declarado, cantidad in danos:
+    for prenda, tipo, descripcion, foto, valor_unitario, cantidad in danos:
         dano = DanoPrenda(
             orden=orden,
             prenda=prenda,
             tipo=tipo,
             cantidad_afectada=cantidad,
             descripcion=descripcion,
-            valor_declarado=valor_declarado,
+            valor_unitario_declarado=valor_unitario,
+            valor_declarado=valor_unitario * cantidad,
             valor_servicio=prenda.valor_de_unidades(cantidad),
             operario=orden.operario,
         )
@@ -810,7 +834,8 @@ def registrar_danos(orden, danos, usuario):
         responsable = nombre_usuario(orden.operario) if orden.operario else "sin operario"
         resumen.append(
             f"{dano.get_tipo_display()} de {cantidad} de {prenda}: {descripcion}. Servicio descontado "
-            f"${dano.valor_servicio}; valor de la prenda ${valor_declarado}, a pagar al cliente. "
+            f"${dano.valor_servicio}; valor declarado ${valor_unitario} por unidad, "
+            f"${dano.valor_declarado} a pagar al cliente. "
             f"Operario: {responsable}"
         )
     orden.aplicar_descuentos_por_incidencia()
@@ -967,6 +992,7 @@ class DanoPrendaSerializer(serializers.ModelSerializer):
             "tipo",
             "tipo_nombre",
             "descripcion",
+            "valor_unitario_declarado",
             "valor_declarado",
             "valor_servicio",
             "operario_nombre",

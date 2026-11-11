@@ -225,6 +225,12 @@ export default async function OrdenPage({
                   </ClayBadge>
                 )}
               </p>
+              {prenda.dano && prenda.dano_valor_declarado !== null && prenda.dano_valor_unitario_declarado !== null && (
+                <p className="mt-1 text-xs text-(--sw-ink-soft)">
+                  Se le debe al cliente {formatCOP(prenda.dano_valor_declarado)} ({prenda.dano_cantidad} ×{" "}
+                  {formatCOP(prenda.dano_valor_unitario_declarado)} por unidad).
+                </p>
+              )}
               {detalles.length > 0 && (
                 <p className="mt-0.5 text-xs text-(--sw-ink-soft)">{detalles.join(" · ")}</p>
               )}

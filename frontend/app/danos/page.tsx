@@ -102,7 +102,8 @@ export default async function DanosPage({
                       Se le debe al cliente: <strong>{formatCOP(d.valor_declarado)}</strong>
                       <span className="text-(--sw-ink-soft)">
                         {" "}
-                        · servicio no cobrado {formatCOP(d.valor_servicio)}
+                        ({d.cantidad_afectada} × {formatCOP(d.valor_unitario_declarado)} por unidad) · servicio no
+                        cobrado {formatCOP(d.valor_servicio)}
                       </span>
                     </p>
                     <p className="mt-1 text-xs text-(--sw-ink-soft)">

@@ -8,7 +8,8 @@ from django.contrib.auth import get_user_model
 from django.core import mail
 from django.core.exceptions import PermissionDenied
 from django.core.exceptions import ValidationError as DjangoValidationError
-from django.db import IntegrityError, OperationalError, transaction
+from django.db import IntegrityError, OperationalError, connection, transaction
+from django.db.migrations.executor import MigrationExecutor
 from django.db.models import ProtectedError
 from django.test import TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
@@ -2948,7 +2949,7 @@ class EntregaEnMostradorMixin(OrdenEnProcesoMixin):
             "resultado": "dano",
             "observacion": "Quemada con la plancha",
             "foto": data_url(JPEG),
-            "valor_declarado": "120000",
+            "valor_unitario_declarado": "120000",
             **extra,
         }
 
@@ -2957,7 +2958,7 @@ class EntregaEnMostradorMixin(OrdenEnProcesoMixin):
             "prenda": prenda.pk,
             "resultado": "perdida",
             "observacion": "No aparece en la bodega",
-            "valor_declarado": "80000",
+            "valor_unitario_declarado": "80000",
             **extra,
         }
 
@@ -2999,53 +3000,85 @@ class EntregaConDanoOPerdidaTests(EntregaEnMostradorMixin, APITestCase):
         self.assertEqual(dano.foto.tipo, "image/jpeg")
         registro = self.eventos(Evento.DANO_PRENDA).get()
         self.assertIn("Daño de 1 de 1 x Camisa · Algodon: Quemada con la plancha", registro.detalle)
-        self.assertIn("valor de la prenda $120000.00, a pagar al cliente. Operario: op", registro.detalle)
+        self.assertIn(
+            "valor declarado $120000.00 por unidad, $120000.00 a pagar al cliente. Operario: op",
+            registro.detalle,
+        )
         self.assertIn("2 prendas verificadas, 1 con daño o pérdida", self.eventos(Evento.ENTREGA).get().detalle)
         self.assertIn("$6000.00 devueltos al cliente", self.eventos(Evento.DEVOLUCION).get().detalle)
         self.assertEqual(self.orden.total_pagado(), Decimal("12000"))
 
-    def tres_unidades_en_la_camisa_1(self):
-        """La camisa_1 pasa a ser una linea de 3 unidades (18000) y se paga la diferencia."""
+    def tres_unidades_en_la_camisa_1(self, precio_unitario="6000"):
+        """La camisa_1 pasa a ser una linea de 3 unidades y se paga la diferencia."""
         Prenda.objects.filter(pk=self.camisa_1.pk).update(cantidad=3)
-        self.camisa_1.servicios.update(valor_aplicado=Decimal("18000"))
+        self.camisa_1.servicios.update(valor_aplicado=Decimal(precio_unitario) * 3)
         self.orden.refresh_from_db()
         self.orden.recalcular()
         self.orden.save()
         self.client.post(
-            f"/api/ordenes/{self.orden.pk}/pagos", {"monto": "12000", "metodo": "efectivo"}, format="json"
+            f"/api/ordenes/{self.orden.pk}/pagos",
+            {"monto": str(self.orden.valor_total - Decimal("12000")), "metodo": "efectivo"},
+            format="json",
         )
 
     def test_la_perdida_de_una_unidad_solo_deja_de_cobrar_esa_unidad(self):
-        self.tres_unidades_en_la_camisa_1()
+        self.tres_unidades_en_la_camisa_1(precio_unitario="18000")
 
-        response = self.entregar(self.perdida(self.camisa_1, cantidad_afectada=1), self.coincide(self.camisa_2))
+        response = self.entregar(
+            self.perdida(self.camisa_1, cantidad_afectada=1, valor_unitario_declarado="25000"),
+            self.coincide(self.camisa_2),
+        )
 
         self.assertEqual(response.status_code, 200, response.json())
         self.orden.refresh_from_db()
         self.assertEqual(
             (self.orden.estado, self.orden.descuento_dano, self.orden.valor_total),
-            (Orden.Estado.ENTREGADA, Decimal("6000"), Decimal("18000")),
+            (Orden.Estado.ENTREGADA, Decimal("18000"), Decimal("42000")),
         )
         dano = DanoPrenda.objects.get()
         self.assertEqual(
-            (dano.cantidad_afectada, dano.valor_servicio, dano.valor_declarado),
-            (1, Decimal("6000"), Decimal("80000")),
+            (dano.cantidad_afectada, dano.valor_servicio, dano.valor_unitario_declarado, dano.valor_declarado),
+            (1, Decimal("18000"), Decimal("25000"), Decimal("25000")),
         )
         self.assertIn("Pérdida de 1 de 3 x Camisa · Algodon", self.eventos(Evento.DANO_PRENDA).get().detalle)
-        self.assertIn("$6000.00 devueltos al cliente", self.eventos(Evento.DEVOLUCION).get().detalle)
+        self.assertIn("$18000.00 devueltos al cliente", self.eventos(Evento.DEVOLUCION).get().detalle)
         self.cliente.refresh_from_db()
-        self.assertEqual(self.cliente.puntos, 18)
+        self.assertEqual(self.cliente.puntos, 42)
         prenda = next(p for p in response.json()["detalle_prendas"] if p["id"] == self.camisa_1.pk)
-        self.assertEqual((prenda["dano"], prenda["dano_cantidad"]), ("perdida", 1))
+        self.assertEqual(
+            (
+                prenda["dano"],
+                prenda["dano_cantidad"],
+                prenda["dano_valor_unitario_declarado"],
+                prenda["dano_valor_declarado"],
+            ),
+            ("perdida", 1, "25000.00", "25000.00"),
+        )
 
-    def test_sin_cantidad_afectada_se_toma_la_linea_completa(self):
+    def test_sin_cantidad_afectada_se_toma_la_linea_completa_y_se_debe_el_valor_de_cada_unidad(self):
         self.tres_unidades_en_la_camisa_1()
 
-        response = self.entregar(self.dano(self.camisa_1), self.coincide(self.camisa_2))
+        response = self.entregar(self.perdida(self.camisa_1), self.coincide(self.camisa_2))
 
         self.assertEqual(response.status_code, 200, response.json())
         dano = DanoPrenda.objects.get()
-        self.assertEqual((dano.cantidad_afectada, dano.valor_servicio), (3, Decimal("18000")))
+        self.assertEqual(
+            (dano.cantidad_afectada, dano.valor_servicio, dano.valor_declarado),
+            (3, Decimal("18000"), Decimal("240000")),
+        )
+
+    def test_el_total_que_se_le_debe_al_cliente_lo_calcula_el_backend(self):
+        self.tres_unidades_en_la_camisa_1()
+
+        response = self.entregar(
+            self.perdida(
+                self.camisa_1, cantidad_afectada=2, valor_unitario_declarado="25000", valor_declarado="999999"
+            ),
+            self.coincide(self.camisa_2),
+        )
+
+        self.assertEqual(response.status_code, 200, response.json())
+        self.assertEqual(DanoPrenda.objects.get().valor_declarado, Decimal("50000"))
 
     def test_la_cantidad_afectada_no_supera_la_de_la_linea(self):
         self.tres_unidades_en_la_camisa_1()
@@ -3066,8 +3099,9 @@ class EntregaConDanoOPerdidaTests(EntregaEnMostradorMixin, APITestCase):
         for campo, incompleto in (
             ("observacion", {"observacion": "  "}),
             ("foto", {"foto": None}),
-            ("valor_declarado", {"valor_declarado": None}),
-            ("valor_declarado", {"valor_declarado": "0"}),
+            ("valor_unitario_declarado", {"valor_unitario_declarado": None}),
+            ("valor_unitario_declarado", {"valor_unitario_declarado": "0"}),
+            ("valor_unitario_declarado", {"valor_unitario_declarado": "-5000"}),
         ):
             with self.subTest(incompleto=incompleto):
                 response = self.entregar(
@@ -3081,7 +3115,7 @@ class EntregaConDanoOPerdidaTests(EntregaEnMostradorMixin, APITestCase):
         self.assertEqual(self.orden.estado, Orden.Estado.LISTA)
 
     def test_la_perdida_exige_descripcion_y_valor_y_no_lleva_foto(self):
-        for incompleta in ({"observacion": ""}, {"valor_declarado": None}, {"foto": data_url(JPEG)}):
+        for incompleta in ({"observacion": ""}, {"valor_unitario_declarado": None}, {"foto": data_url(JPEG)}):
             with self.subTest(incompleta=incompleta):
                 response = self.entregar(
                     self.perdida(self.camisa_1, **incompleta), self.coincide(self.camisa_2)
@@ -3442,8 +3476,13 @@ class DanosApiTests(EntregaEnMostradorMixin, APITestCase):
                     (self.orden.codigo, "Ana Gomez", "Daño", "Pendiente de pago"),
                 )
                 self.assertEqual(
-                    (caso["valor_declarado"], caso["valor_servicio"], caso["operario_nombre"]),
-                    ("120000.00", "6000.00", "op"),
+                    (
+                        caso["valor_unitario_declarado"],
+                        caso["valor_declarado"],
+                        caso["valor_servicio"],
+                        caso["operario_nombre"],
+                    ),
+                    ("120000.00", "120000.00", "6000.00", "op"),
                 )
                 self.assertEqual(caso["registrado_por_nombre"], "recepcion")
                 self.assertEqual((caso["cantidad_afectada"], caso["prenda_cantidad"]), (1, 1))
@@ -3577,3 +3616,37 @@ class AcumularPuntosTests(CatalogoDePruebaMixin, APITestCase):
         self.assertEqual(self.orden.estado, Orden.Estado.LISTA)
         self.assertEqual(self.puntos(), 0)
         self.assertFalse(self.orden.historial.filter(tipo_evento=Evento.ENTREGA).exists())
+
+
+class MigracionValorUnitarioDeclaradoTests(TransactionTestCase):
+    antes = [("ordenes", "0013_dano_cantidad_afectada")]
+    despues = [("ordenes", "0014_dano_valor_unitario_declarado")]
+
+    def test_un_dano_existente_conserva_su_total_y_reparte_el_valor_por_unidad(self):
+        executor = MigrationExecutor(connection)
+        executor.migrate(self.antes)
+        # Solo DanoPrenda cambia entre 0013 y 0014; lo demas se crea con los modelos actuales.
+        DanoAntes = executor.loader.project_state(self.antes).apps.get_model("ordenes", "DanoPrenda")
+        orden = crear_orden()
+        prenda = Prenda.objects.create(
+            orden=orden, tipo_prenda=TipoPrenda.objects.create(nombre="Pantalon"), cantidad=3
+        )
+        DanoAntes.objects.create(
+            orden_id=orden.pk,
+            prenda_id=prenda.pk,
+            tipo="perdida",
+            cantidad_afectada=3,
+            descripcion="No aparece",
+            valor_declarado=Decimal("75000"),
+            valor_servicio=Decimal("54000"),
+        )
+
+        executor.loader.build_graph()
+        executor.migrate(self.despues)
+
+        dano = DanoPrenda.objects.get()
+        self.assertEqual(
+            (dano.valor_declarado, dano.valor_unitario_declarado, dano.valor_servicio),
+            (Decimal("75000"), Decimal("25000"), Decimal("54000")),
+        )
+
