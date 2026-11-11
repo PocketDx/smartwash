@@ -364,6 +364,10 @@ class Prenda(ModeloConAutoria):
     def valor(self):
         return self.servicios.aggregate(total=Sum("valor_aplicado"))["total"] or Decimal("0")
 
+    def valor_de_unidades(self, unidades):
+        """Lo que cuestan `unidades` de esta linea: valor_aplicado es precio unitario x cantidad."""
+        return (self.valor() * unidades / self.cantidad).quantize(Decimal("0.01"))
+
 
 class OrdenServicio(ModeloConAutoria):
     prenda = models.ForeignKey(
@@ -643,6 +647,8 @@ class DanoPrenda(ModeloConAutoria):
     orden = models.ForeignKey(Orden, on_delete=models.PROTECT, related_name="danos")
     prenda = models.OneToOneField(Prenda, on_delete=models.PROTECT, related_name="dano")
     tipo = models.CharField(max_length=20, choices=Tipo.choices)
+    # Unidades de la linea afectadas; solo esas dejan de cobrarse (valor_servicio).
+    cantidad_afectada = models.PositiveIntegerField(default=1)
     descripcion = models.TextField()
     valor_declarado = models.DecimalField(max_digits=10, decimal_places=2)
     valor_servicio = models.DecimalField(max_digits=10, decimal_places=2)
@@ -671,11 +677,14 @@ class DanoPrenda(ModeloConAutoria):
         constraints = [
             models.CheckConstraint(
                 condition=models.Q(valor_declarado__gt=0), name="dano_valor_declarado_positivo"
-            )
+            ),
+            models.CheckConstraint(
+                condition=models.Q(cantidad_afectada__gt=0), name="dano_cantidad_afectada_positiva"
+            ),
         ]
 
     def __str__(self):
-        return f"{self.get_tipo_display()} · {self.orden.codigo} · {self.prenda}"
+        return f"{self.get_tipo_display()} · {self.orden.codigo} · {self.cantidad_afectada} de {self.prenda}"
 
 
 class FotoDano(FotoEnBase64):

@@ -186,6 +186,7 @@ class PrendaSerializer(serializers.ModelSerializer):
     material_nombre = serializers.CharField(source="material.nombre", read_only=True, allow_null=True)
     servicios = OrdenServicioSerializer(many=True, read_only=True)
     dano = serializers.SerializerMethodField()
+    dano_cantidad = serializers.SerializerMethodField()
 
     class Meta:
         model = Prenda
@@ -203,10 +204,14 @@ class PrendaSerializer(serializers.ModelSerializer):
             "estado_inicial",
             "servicios",
             "dano",
+            "dano_cantidad",
         )
 
     def get_dano(self, prenda) -> str | None:
         return prenda.dano.tipo if hasattr(prenda, "dano") else None
+
+    def get_dano_cantidad(self, prenda) -> int | None:
+        return prenda.dano.cantidad_afectada if hasattr(prenda, "dano") else None
 
 
 class OrdenSerializer(serializers.ModelSerializer):
@@ -711,6 +716,8 @@ class VerificacionPrendaSerializer(serializers.Serializer):
     valor_declarado = serializers.DecimalField(
         max_digits=10, decimal_places=2, min_value=Decimal("1"), required=False, allow_null=True
     )
+    # Solo para dano o perdida; sin ella se toma la linea completa.
+    cantidad_afectada = serializers.IntegerField(min_value=1, required=False, allow_null=True)
 
     def validate(self, attrs):
         resultado = attrs.get("resultado")
@@ -766,21 +773,32 @@ class EntregaSerializer(serializers.Serializer):
             if v["resultado"] == ResultadoVerificacion.NOVEDAD:
                 novedades.append((prenda, v["observacion"], v["foto"]))
             elif v["resultado"] in DanoPrenda.Tipo.values:
-                danos.append((prenda, v["resultado"], v["observacion"], v["foto"], v["valor_declarado"]))
+                cantidad = v.get("cantidad_afectada") or prenda.cantidad
+                if cantidad > prenda.cantidad:
+                    raise serializers.ValidationError(
+                        {
+                            "cantidad_afectada": f'"{prenda}" tiene {prenda.cantidad} unidades: '
+                            f"indica entre 1 y {prenda.cantidad}."
+                        }
+                    )
+                danos.append(
+                    (prenda, v["resultado"], v["observacion"], v["foto"], v["valor_declarado"], cantidad)
+                )
         return novedades, danos
 
 
 def registrar_danos(orden, danos, usuario):
     """Deja de cobrar el servicio de cada prenda danada o perdida y registra lo que se le debe al cliente."""
     resumen = []
-    for prenda, tipo, descripcion, foto, valor_declarado in danos:
+    for prenda, tipo, descripcion, foto, valor_declarado, cantidad in danos:
         dano = DanoPrenda(
             orden=orden,
             prenda=prenda,
             tipo=tipo,
+            cantidad_afectada=cantidad,
             descripcion=descripcion,
             valor_declarado=valor_declarado,
-            valor_servicio=prenda.valor(),
+            valor_servicio=prenda.valor_de_unidades(cantidad),
             operario=orden.operario,
         )
         dano.registrar_autoria(usuario)
@@ -791,7 +809,7 @@ def registrar_danos(orden, danos, usuario):
             foto.save()
         responsable = nombre_usuario(orden.operario) if orden.operario else "sin operario"
         resumen.append(
-            f"{dano.get_tipo_display()} de {prenda}: {descripcion}. Servicio descontado "
+            f"{dano.get_tipo_display()} de {cantidad} de {prenda}: {descripcion}. Servicio descontado "
             f"${dano.valor_servicio}; valor de la prenda ${valor_declarado}, a pagar al cliente. "
             f"Operario: {responsable}"
         )
@@ -927,6 +945,7 @@ class DanoPrendaSerializer(serializers.ModelSerializer):
     orden_codigo = serializers.CharField(source="orden.codigo", read_only=True)
     cliente_nombre = serializers.CharField(source="orden.cliente.nombre_completo", read_only=True)
     prenda_nombre = serializers.CharField(source="prenda.__str__", read_only=True)
+    prenda_cantidad = serializers.IntegerField(source="prenda.cantidad", read_only=True)
     tipo_nombre = serializers.CharField(source="get_tipo_display", read_only=True)
     estado_nombre = serializers.CharField(source="get_estado_display", read_only=True)
     operario_nombre = serializers.SerializerMethodField()
@@ -943,6 +962,8 @@ class DanoPrendaSerializer(serializers.ModelSerializer):
             "cliente_nombre",
             "prenda",
             "prenda_nombre",
+            "prenda_cantidad",
+            "cantidad_afectada",
             "tipo",
             "tipo_nombre",
             "descripcion",

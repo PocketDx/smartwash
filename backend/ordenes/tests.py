@@ -2998,11 +2998,69 @@ class EntregaConDanoOPerdidaTests(EntregaEnMostradorMixin, APITestCase):
         self.assertEqual((dano.operario, dano.creado_por), (self.operario, self.recepcionista))
         self.assertEqual(dano.foto.tipo, "image/jpeg")
         registro = self.eventos(Evento.DANO_PRENDA).get()
-        self.assertIn("Daño de 1 x Camisa · Algodon: Quemada con la plancha", registro.detalle)
+        self.assertIn("Daño de 1 de 1 x Camisa · Algodon: Quemada con la plancha", registro.detalle)
         self.assertIn("valor de la prenda $120000.00, a pagar al cliente. Operario: op", registro.detalle)
         self.assertIn("2 prendas verificadas, 1 con daño o pérdida", self.eventos(Evento.ENTREGA).get().detalle)
         self.assertIn("$6000.00 devueltos al cliente", self.eventos(Evento.DEVOLUCION).get().detalle)
         self.assertEqual(self.orden.total_pagado(), Decimal("12000"))
+
+    def tres_unidades_en_la_camisa_1(self):
+        """La camisa_1 pasa a ser una linea de 3 unidades (18000) y se paga la diferencia."""
+        Prenda.objects.filter(pk=self.camisa_1.pk).update(cantidad=3)
+        self.camisa_1.servicios.update(valor_aplicado=Decimal("18000"))
+        self.orden.refresh_from_db()
+        self.orden.recalcular()
+        self.orden.save()
+        self.client.post(
+            f"/api/ordenes/{self.orden.pk}/pagos", {"monto": "12000", "metodo": "efectivo"}, format="json"
+        )
+
+    def test_la_perdida_de_una_unidad_solo_deja_de_cobrar_esa_unidad(self):
+        self.tres_unidades_en_la_camisa_1()
+
+        response = self.entregar(self.perdida(self.camisa_1, cantidad_afectada=1), self.coincide(self.camisa_2))
+
+        self.assertEqual(response.status_code, 200, response.json())
+        self.orden.refresh_from_db()
+        self.assertEqual(
+            (self.orden.estado, self.orden.descuento_dano, self.orden.valor_total),
+            (Orden.Estado.ENTREGADA, Decimal("6000"), Decimal("18000")),
+        )
+        dano = DanoPrenda.objects.get()
+        self.assertEqual(
+            (dano.cantidad_afectada, dano.valor_servicio, dano.valor_declarado),
+            (1, Decimal("6000"), Decimal("80000")),
+        )
+        self.assertIn("Pérdida de 1 de 3 x Camisa · Algodon", self.eventos(Evento.DANO_PRENDA).get().detalle)
+        self.assertIn("$6000.00 devueltos al cliente", self.eventos(Evento.DEVOLUCION).get().detalle)
+        self.cliente.refresh_from_db()
+        self.assertEqual(self.cliente.puntos, 18)
+        prenda = next(p for p in response.json()["detalle_prendas"] if p["id"] == self.camisa_1.pk)
+        self.assertEqual((prenda["dano"], prenda["dano_cantidad"]), ("perdida", 1))
+
+    def test_sin_cantidad_afectada_se_toma_la_linea_completa(self):
+        self.tres_unidades_en_la_camisa_1()
+
+        response = self.entregar(self.dano(self.camisa_1), self.coincide(self.camisa_2))
+
+        self.assertEqual(response.status_code, 200, response.json())
+        dano = DanoPrenda.objects.get()
+        self.assertEqual((dano.cantidad_afectada, dano.valor_servicio), (3, Decimal("18000")))
+
+    def test_la_cantidad_afectada_no_supera_la_de_la_linea(self):
+        self.tres_unidades_en_la_camisa_1()
+
+        for cantidad in (0, 4):
+            with self.subTest(cantidad=cantidad):
+                response = self.entregar(
+                    self.perdida(self.camisa_1, cantidad_afectada=cantidad), self.coincide(self.camisa_2)
+                )
+
+                self.assertEqual(response.status_code, 400)
+                self.assertIn("cantidad_afectada", str(response.json()))
+        self.assertFalse(DanoPrenda.objects.exists())
+        self.orden.refresh_from_db()
+        self.assertEqual(self.orden.estado, Orden.Estado.LISTA)
 
     def test_el_dano_exige_observacion_foto_y_valor(self):
         for campo, incompleto in (
@@ -3038,7 +3096,7 @@ class EntregaConDanoOPerdidaTests(EntregaEnMostradorMixin, APITestCase):
         perdida = DanoPrenda.objects.get()
         self.assertEqual((perdida.tipo, perdida.valor_declarado), ("perdida", Decimal("80000")))
         self.assertFalse(hasattr(perdida, "foto"))
-        self.assertIn("Pérdida de 1 x Camisa", self.eventos(Evento.DANO_PRENDA).get().detalle)
+        self.assertIn("Pérdida de 1 de 1 x Camisa", self.eventos(Evento.DANO_PRENDA).get().detalle)
 
     def test_el_detalle_de_la_orden_marca_la_prenda_danada(self):
         self.entregar(self.dano(self.camisa_1), self.coincide(self.camisa_2))
@@ -3388,6 +3446,7 @@ class DanosApiTests(EntregaEnMostradorMixin, APITestCase):
                     ("120000.00", "6000.00", "op"),
                 )
                 self.assertEqual(caso["registrado_por_nombre"], "recepcion")
+                self.assertEqual((caso["cantidad_afectada"], caso["prenda_cantidad"]), (1, 1))
                 self.assertEqual(self.client.get(caso["foto_url"]).status_code, 200)
 
     def test_el_operario_no_ve_la_seccion(self):
@@ -3408,7 +3467,7 @@ class DanosApiTests(EntregaEnMostradorMixin, APITestCase):
         self.assertIsNotNone(self.dano_registrado.pagado_en)
         self.assertEqual(
             self.eventos(Evento.PAGO_DANO).get().detalle,
-            "$120000.00 pagados al cliente por daño de 1 x Camisa · Algodon. Transferencia a Ana",
+            "$120000.00 pagados al cliente por daño de 1 de 1 x Camisa · Algodon. Transferencia a Ana",
         )
         self.assertEqual(self.pagar_dano(self.admin).status_code, 400)
 
