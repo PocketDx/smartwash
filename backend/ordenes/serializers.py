@@ -840,12 +840,116 @@ class OrdenBandejaSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
+ETAPAS_FLUJO = (
+    Orden.Estado.RECIBIDA,
+    Orden.Estado.CLASIFICADA,
+    Orden.Estado.EN_PROCESO,
+    Orden.Estado.CONTROL_CALIDAD,
+    Orden.Estado.LISTA,
+)
+ETAPA_PAGADA = "Pagada"
+ETAPAS_SEGUIMIENTO = (*ETAPAS_FLUJO, ETAPA_PAGADA, Orden.Estado.ENTREGADA)
+# Eventos cuyo detalle empieza con "Estado A → Estado B".
+EVENTOS_CON_TRANSICION = (
+    Evento.CAMBIO_ESTADO,
+    Evento.DECISION_NOVEDAD,
+    Evento.NOVEDAD,
+    Evento.ENTREGA,
+    Evento.CANCELACION,
+)
+
+
+def estado_destino(detalle):
+    """El estado al que entro la orden segun el detalle "A → B..."; None si no hay transicion."""
+    _, flecha, resto = detalle.partition(" → ")
+    if not flecha:
+        return None
+    return next((e for e in Orden.Estado.values if resto.startswith(e)), None)
+
+
+def entradas_a_cada_estado(orden):
+    """Ultima vez que la orden entro a cada estado, segun su historial."""
+    entradas = {}
+    for evento in orden.historial.filter(tipo_evento__in=EVENTOS_CON_TRANSICION):
+        destino = estado_destino(evento.detalle)
+        if destino:
+            entradas[destino] = evento.fecha
+    return entradas
+
+
+def momento_de_pago_completo(orden):
+    if orden.valor_total <= 0 or orden.total_pagado() < orden.valor_total:
+        return None
+    acumulado = Decimal("0")
+    for pago in orden.pagos.all():
+        acumulado += pago.monto
+        if acumulado >= orden.valor_total:
+            return pago.creado_en
+    return None
+
+
+def etapa_en_el_flujo(orden):
+    """La etapa del flujo en la que esta la orden; con novedad, la etapa desde la que se detuvo."""
+    estado = orden.estado
+    if estado == Orden.Estado.CON_NOVEDAD:
+        ultima = orden.novedades.order_by("creado_en", "id").last()
+        estado = ultima.estado_anterior if ultima else Orden.Estado.EN_PROCESO
+    elif estado == Orden.Estado.CANCELADA:
+        anterior = orden.historial.filter(tipo_evento=Evento.CANCELACION).last()
+        estado = anterior.detalle.partition(" → ")[0] if anterior else Orden.Estado.EN_ESPERA
+        if estado == Orden.Estado.CON_NOVEDAD:
+            ultima = orden.novedades.order_by("creado_en", "id").last()
+            estado = ultima.estado_anterior if ultima else Orden.Estado.EN_PROCESO
+    return estado if estado in ETAPAS_SEGUIMIENTO else None
+
+
 class ConsultaPublicaSerializer(serializers.ModelSerializer):
-    # Publica: sin cliente, montos ni id interno.
+    """Publica: solo codigo, estado, fechas y etapas; sin cliente, usuarios, montos ni ids."""
+
     class Meta:
         model = Orden
         fields = ("codigo", "estado", "fecha_estimada_entrega")
         read_only_fields = fields
+
+    def to_representation(self, orden):
+        datos = super().to_representation(orden)
+        fecha = serializers.DateTimeField().to_representation
+        entradas = entradas_a_cada_estado(orden)
+        actual = etapa_en_el_flujo(orden)
+        alcanzadas = ETAPAS_FLUJO[: ETAPAS_FLUJO.index(actual) + 1] if actual in ETAPAS_FLUJO else ()
+        if actual == Orden.Estado.ENTREGADA:
+            alcanzadas = ETAPAS_FLUJO
+
+        fechas = {}
+        for etapa in ETAPAS_FLUJO:
+            # Tras un reproceso, las etapas posteriores a la actual vuelven a estar pendientes.
+            fechas[etapa] = entradas.get(etapa) if etapa in alcanzadas else None
+        if Orden.Estado.RECIBIDA in alcanzadas:
+            # La orden nace "En espera"; si es anterior a esa regla, se usa su registro.
+            fechas[Orden.Estado.RECIBIDA] = entradas.get(Orden.Estado.RECIBIDA) or next(
+                (e.fecha for e in orden.historial.filter(tipo_evento=Evento.CREACION)), None
+            )
+        fechas[ETAPA_PAGADA] = momento_de_pago_completo(orden)
+        fechas[Orden.Estado.ENTREGADA] = (
+            entradas.get(Orden.Estado.ENTREGADA) if actual == Orden.Estado.ENTREGADA else None
+        )
+
+        cancelada = orden.estado == Orden.Estado.CANCELADA
+        datos.update(
+            etapa_actual=actual,
+            etapas=[
+                {"etapa": etapa, "fecha": fecha(fechas[etapa]) if fechas[etapa] else None}
+                for etapa in ETAPAS_SEGUIMIENTO
+            ],
+            con_novedad=orden.estado == Orden.Estado.CON_NOVEDAD,
+            cancelada=cancelada,
+            fecha_cancelacion=(
+                fecha(entradas[Orden.Estado.CANCELADA])
+                if cancelada and Orden.Estado.CANCELADA in entradas
+                else None
+            ),
+        )
+        return datos
 
 
 class OrdenHistorialClienteSerializer(serializers.ModelSerializer):

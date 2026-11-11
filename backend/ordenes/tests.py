@@ -2858,7 +2858,23 @@ class CancelarOrdenConNovedadApiTests(OrdenEnProcesoMixin, APITestCase):
         self.assertFalse(self.orden.historial.filter(tipo_evento=Evento.CANCELACION).exists())
 
 
-class ConsultaPublicaApiTests(APITestCase):
+def hora(dia, hora_bogota):
+    """Momento del 2026-11-<dia> a la hora indicada de Bogota (UTC-5)."""
+    return datetime(2026, 11, dia, hora_bogota + 5, tzinfo=dt_timezone.utc)
+
+
+ETAPAS_PUBLICAS = [
+    "Recibida",
+    "Clasificada",
+    "En proceso",
+    "Control de calidad",
+    "Lista para entrega",
+    "Pagada",
+    "Entregada",
+]
+
+
+class ConsultaPublicaApiTests(CatalogoDePruebaMixin, APITestCase):
     def setUp(self):
         self.orden = crear_orden(codigo="SW-ABCD2345")
 
@@ -2874,9 +2890,10 @@ class ConsultaPublicaApiTests(APITestCase):
         response = self.consultar()
 
         self.assertEqual(response.status_code, 200)
+        datos = response.json()
         self.assertEqual(
-            response.json(),
-            {"codigo": "SW-ABCD2345", "estado": "Recibida", "fecha_estimada_entrega": "2026-11-03"},
+            (datos["codigo"], datos["estado"], datos["fecha_estimada_entrega"]),
+            ("SW-ABCD2345", "Recibida", "2026-11-03"),
         )
 
     def test_en_espera_se_muestra_sin_fecha_estimada(self):
@@ -2901,9 +2918,155 @@ class ConsultaPublicaApiTests(APITestCase):
 
         datos = self.consultar().json()
 
-        self.assertEqual(set(datos), {"codigo", "estado", "fecha_estimada_entrega"})
+        self.assertEqual(
+            set(datos),
+            {
+                "codigo",
+                "estado",
+                "fecha_estimada_entrega",
+                "etapa_actual",
+                "etapas",
+                "con_novedad",
+                "cancelada",
+                "fecha_cancelacion",
+            },
+        )
+        self.assertEqual({tuple(e) for e in datos["etapas"]}, {("etapa", "fecha")})
         self.assertNotIn("Ana Gomez", str(datos))
         self.assertNotIn("16000", str(datos))
+        self.assertNotIn(str(self.orden.pk), str(datos).replace("SW-ABCD2345", ""))
+
+    # Orden recorrida por la API, con la hora de cada paso fija.
+    def en(self, momento, metodo, url, datos):
+        with mock.patch("django.utils.timezone.now", return_value=momento):
+            response = getattr(self.client, metodo)(url, datos, format="json")
+        self.assertIn(response.status_code, (200, 201), response.content[:300])
+        return response
+
+    def recorrer(self, *hasta):
+        self.cliente = self.orden.cliente
+        self.camisa = TipoPrenda.objects.create(nombre="Camisa")
+        facil = NivelDificultad.objects.create(nombre="Facil", factor=Decimal("1.00"))
+        self.algodon = Material.objects.create(nombre="Algodon", nivel_dificultad=facil)
+        self.planchado = Servicio.objects.create(nombre="Planchado")
+        self.tarifa(self.camisa, self.planchado, "6000")
+        self.operario = User.objects.create_user(username="op", password="x", rol=User.Rol.OPERARIO)
+        admin = User.objects.create_user(username="admin", password="x", rol=User.Rol.ADMINISTRADOR)
+        self.client.force_authenticate(admin)
+        orden = self.en(hora(10, 8), "post", "/api/ordenes", {
+            "cliente": self.cliente.pk,
+            "prendas": [{"tipo_prenda": self.camisa.pk, "material": self.algodon.pk, "cantidad": 1,
+                         "peso": "1", "servicios": [self.planchado.pk]}],
+        }).json()
+        self.url = f"/api/ordenes/{orden['id']}"
+        self.codigo = orden["codigo"]
+        pasos = {
+            "abono": (hora(10, 9), "post", "/pagos", {"monto": "1800", "metodo": "efectivo"}),
+            "clasificar": (hora(10, 10), "post", "/estado", {"estado": "Clasificada"}),
+            "asignar": (hora(10, 11), "post", "/asignacion", {"operario": self.operario.pk}),
+            "procesar": (hora(10, 12), "post", "/estado", {"estado": "En proceso"}),
+            "calidad": (hora(11, 9), "post", "/estado", {"estado": "Control de calidad"}),
+            "reprocesar": (hora(11, 10), "post", "/estado", {"estado": "En proceso"}),
+            "lista": (hora(11, 15), "post", "/estado", {"estado": "Lista para entrega"}),
+            "saldo": (hora(11, 16), "post", "/pagos", {"monto": "4200", "metodo": "tarjeta"}),
+            "entregar": (hora(12, 17), "post", "/entrega", None),
+            "cancelar": (hora(10, 11), "post", "/cancelacion", {"motivo": "El cliente se retracto"}),
+        }
+        for paso in hasta:
+            momento, metodo, ruta, datos = pasos[paso]
+            if paso == "entregar":
+                prenda = self.client.get(self.url).json()["detalle_prendas"][0]["id"]
+                datos = {"prendas": [{"prenda": prenda, "resultado": "coincide"}]}
+            self.en(momento, metodo, self.url + ruta, datos)
+        self.client.force_authenticate(None)
+        return self.consultar(self.codigo).json()
+
+    def fechas(self, datos):
+        self.assertEqual([e["etapa"] for e in datos["etapas"]], ETAPAS_PUBLICAS)
+        return {e["etapa"]: e["fecha"] for e in datos["etapas"]}
+
+    def test_la_orden_recien_creada_no_tiene_etapas_cumplidas(self):
+        datos = self.recorrer()
+
+        self.assertEqual(datos["estado"], "En espera")
+        self.assertIsNone(datos["etapa_actual"])
+        self.assertEqual(set(self.fechas(datos).values()), {None})
+        self.assertEqual((datos["con_novedad"], datos["cancelada"], datos["fecha_cancelacion"]), (False, False, None))
+
+    def test_cada_etapa_lleva_la_fecha_y_hora_en_que_la_orden_entro_a_ella(self):
+        datos = self.recorrer("abono", "clasificar", "asignar", "procesar", "calidad")
+
+        self.assertEqual(datos["etapa_actual"], "Control de calidad")
+        self.assertEqual(
+            self.fechas(datos),
+            {
+                "Recibida": "2026-11-10T09:00:00-05:00",
+                "Clasificada": "2026-11-10T10:00:00-05:00",
+                "En proceso": "2026-11-10T12:00:00-05:00",
+                "Control de calidad": "2026-11-11T09:00:00-05:00",
+                "Lista para entrega": None,
+                "Pagada": None,
+                "Entregada": None,
+            },
+        )
+
+    def test_la_orden_pagada_y_entregada_completa_la_linea(self):
+        datos = self.recorrer(
+            "abono", "clasificar", "asignar", "procesar", "calidad", "lista", "saldo", "entregar"
+        )
+
+        fechas = self.fechas(datos)
+        self.assertEqual(datos["etapa_actual"], "Entregada")
+        self.assertNotIn(None, fechas.values())
+        self.assertEqual(fechas["Pagada"], "2026-11-11T16:00:00-05:00")
+        self.assertEqual(fechas["Entregada"], "2026-11-12T17:00:00-05:00")
+
+    def test_pagada_queda_pendiente_mientras_falte_saldo(self):
+        fechas = self.fechas(self.recorrer("abono", "clasificar", "asignar", "procesar", "calidad", "lista"))
+
+        self.assertIsNone(fechas["Pagada"])
+        self.assertEqual(fechas["Lista para entrega"], "2026-11-11T15:00:00-05:00")
+
+    def test_con_reproceso_se_muestra_la_ultima_entrada_y_lo_posterior_vuelve_a_pendiente(self):
+        datos = self.recorrer("abono", "clasificar", "asignar", "procesar", "calidad", "reprocesar")
+
+        fechas = self.fechas(datos)
+        self.assertEqual(datos["etapa_actual"], "En proceso")
+        self.assertEqual(fechas["En proceso"], "2026-11-11T10:00:00-05:00")
+        self.assertIsNone(fechas["Control de calidad"])
+        self.assertEqual(fechas["Clasificada"], "2026-11-10T10:00:00-05:00")
+
+    def test_la_orden_cancelada_marca_la_cancelacion_y_conserva_lo_cumplido(self):
+        datos = self.recorrer("abono", "cancelar")
+
+        fechas = self.fechas(datos)
+        self.assertEqual((datos["estado"], datos["cancelada"]), ("Cancelada", True))
+        self.assertEqual(datos["fecha_cancelacion"], "2026-11-10T11:00:00-05:00")
+        self.assertEqual(datos["etapa_actual"], "Recibida")
+        self.assertEqual(fechas["Recibida"], "2026-11-10T09:00:00-05:00")
+        self.assertIsNone(fechas["Clasificada"])
+
+    def test_la_orden_con_novedad_mantiene_la_etapa_en_que_estaba(self):
+        self.recorrer("abono", "clasificar", "asignar", "procesar")
+        self.client.force_authenticate(self.operario)
+        prenda = Prenda.objects.get(orden__codigo=self.codigo)
+        self.en(hora(11, 8), "post", self.url + "/novedades",
+                {"prenda": prenda.pk, "descripcion": "Mancha", "foto": data_url(JPEG)})
+        self.client.force_authenticate(None)
+
+        datos = self.consultar(self.codigo).json()
+
+        self.assertEqual((datos["estado"], datos["con_novedad"]), ("Con novedad", True))
+        self.assertEqual(datos["etapa_actual"], "En proceso")
+        self.assertEqual(self.fechas(datos)["En proceso"], "2026-11-10T12:00:00-05:00")
+
+    def test_la_respuesta_publica_no_trae_usuarios_montos_ni_ids(self):
+        datos = self.recorrer("abono", "clasificar", "asignar", "procesar")
+        texto = str(datos)
+
+        for interno in ("Ana Gomez", "admin", "op", "recepcion", "1800", "6000", "efectivo"):
+            with self.subTest(interno=interno):
+                self.assertNotIn(interno, texto.replace("En proceso", "").replace(self.codigo, ""))
 
     def test_cualquier_rol_puede_consultar(self):
         for rol in User.Rol.values:
