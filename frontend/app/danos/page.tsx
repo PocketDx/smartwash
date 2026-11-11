@@ -73,7 +73,7 @@ export default async function DanosPage({
                       {/* eslint-disable-next-line @next/next/no-img-element -- la foto la sirve el backend con la sesion */}
                       <img
                         src={d.foto_url}
-                        alt={`Foto del dano en ${d.prenda_nombre}`}
+                        alt={`Foto del dano en ${d.cantidad_afectada} de ${d.prenda_nombre}`}
                         className="h-24 w-24 rounded-xl object-cover"
                         loading="lazy"
                       />
@@ -85,7 +85,9 @@ export default async function DanosPage({
                   )}
                   <div className="min-w-0 flex-1 text-sm">
                     <div className="flex flex-wrap items-center gap-2">
-                      <p className="font-semibold text-(--sw-ink)">{d.prenda_nombre}</p>
+                      <p className="font-semibold text-(--sw-ink)">
+                        {d.cantidad_afectada} de {d.prenda_nombre}
+                      </p>
                       <ClayBadge color={d.tipo === "perdida" ? "lavender" : "peach"}>{d.tipo_nombre}</ClayBadge>
                       <ClayBadge color={d.estado === "pagado" ? "mint" : "blue"}>{d.estado_nombre}</ClayBadge>
                     </div>

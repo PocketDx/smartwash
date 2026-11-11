@@ -482,6 +482,8 @@ export type PrendaDeOrden = {
   servicios: ServicioDePrenda[];
   /** La lavanderia la dano o la perdio (HU19): ya no se cobra ni se vuelve a verificar. */
   dano: TipoDano | null;
+  /** Unidades de la linea danadas o perdidas; las demas se entregaron y se cobraron. */
+  dano_cantidad: number | null;
 };
 
 /** Lo que devuelve OrdenSerializer. Los montos llegan como texto decimal. */
@@ -638,6 +640,8 @@ export type VerificacionPrenda = {
   observacion: string;
   foto: string | null;
   valor_declarado: string | null;
+  /** Solo con dano o perdida: unidades de la linea afectadas (1 a su cantidad). */
+  cantidad_afectada: number | null;
 };
 
 /** Entrega la orden verificando cada prenda que sigue en ella (HU12). El backend
@@ -794,6 +798,8 @@ export type DanoPrenda = {
   cliente_nombre: string;
   prenda: number;
   prenda_nombre: string;
+  prenda_cantidad: number;
+  cantidad_afectada: number;
   tipo: TipoDano;
   tipo_nombre: string;
   descripcion: string;
