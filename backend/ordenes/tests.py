@@ -2929,6 +2929,7 @@ class ConsultaPublicaApiTests(CatalogoDePruebaMixin, APITestCase):
                 "con_novedad",
                 "cancelada",
                 "fecha_cancelacion",
+                "eventos",
             },
         )
         self.assertEqual({tuple(e) for e in datos["etapas"]}, {("etapa", "fecha")})
@@ -2949,7 +2950,9 @@ class ConsultaPublicaApiTests(CatalogoDePruebaMixin, APITestCase):
         facil = NivelDificultad.objects.create(nombre="Facil", factor=Decimal("1.00"))
         self.algodon = Material.objects.create(nombre="Algodon", nivel_dificultad=facil)
         self.planchado = Servicio.objects.create(nombre="Planchado")
+        self.lavado = Servicio.objects.create(nombre="Lavado")
         self.tarifa(self.camisa, self.planchado, "6000")
+        self.tarifa(self.camisa, self.lavado, "4000")
         self.operario = User.objects.create_user(username="op", password="x", rol=User.Rol.OPERARIO)
         admin = User.objects.create_user(username="admin", password="x", rol=User.Rol.ADMINISTRADOR)
         self.client.force_authenticate(admin)
@@ -2967,6 +2970,7 @@ class ConsultaPublicaApiTests(CatalogoDePruebaMixin, APITestCase):
             "procesar": (hora(10, 12), "post", "/estado", {"estado": "En proceso"}),
             "calidad": (hora(11, 9), "post", "/estado", {"estado": "Control de calidad"}),
             "reprocesar": (hora(11, 10), "post", "/estado", {"estado": "En proceso"}),
+            "calidad2": (hora(11, 12), "post", "/estado", {"estado": "Control de calidad"}),
             "lista": (hora(11, 15), "post", "/estado", {"estado": "Lista para entrega"}),
             "saldo": (hora(11, 16), "post", "/pagos", {"monto": "4200", "metodo": "tarjeta"}),
             "entregar": (hora(12, 17), "post", "/entrega", None),
@@ -2980,6 +2984,22 @@ class ConsultaPublicaApiTests(CatalogoDePruebaMixin, APITestCase):
             self.en(momento, metodo, self.url + ruta, datos)
         self.client.force_authenticate(None)
         return self.consultar(self.codigo).json()
+
+    def novedad_y_decision(self, decision, **extra):
+        prenda = Prenda.objects.get(orden__codigo=self.codigo)
+        self.client.force_authenticate(self.operario)
+        self.en(hora(11, 10), "post", self.url + "/novedades",
+                {"prenda": prenda.pk, "descripcion": "Mancha de tinta", "foto": data_url(JPEG)})
+        self.client.force_authenticate(User.objects.get(username="admin"))
+        if decision == "agregar_servicio":
+            extra["servicios"] = [{"prenda": prenda.pk, "servicio": self.lavado.pk}]
+        self.en(hora(11, 11), "post", self.url + "/decision",
+                {"decision": decision, "observacion": "Hable con Ana por telefono", **extra})
+        self.client.force_authenticate(None)
+        return self.consultar(self.codigo).json()
+
+    def etiquetas(self, datos):
+        return [e["etiqueta"] for e in datos["eventos"]]
 
     def fechas(self, datos):
         self.assertEqual([e["etapa"] for e in datos["etapas"]], ETAPAS_PUBLICAS)
@@ -3035,6 +3055,68 @@ class ConsultaPublicaApiTests(CatalogoDePruebaMixin, APITestCase):
         self.assertEqual(fechas["En proceso"], "2026-11-11T10:00:00-05:00")
         self.assertIsNone(fechas["Control de calidad"])
         self.assertEqual(fechas["Clasificada"], "2026-11-10T10:00:00-05:00")
+        self.assertEqual(
+            self.etiquetas(datos),
+            ["Orden recibida", "Prendas clasificadas", "En proceso", "En control de calidad", "Volvio a proceso"],
+        )
+        self.assertEqual(datos["eventos"][-1]["fecha"], "2026-11-11T10:00:00-05:00")
+
+    def test_la_orden_entregada_tras_un_reproceso_completa_la_linea_con_las_ultimas_fechas(self):
+        datos = self.recorrer(
+            "abono", "clasificar", "asignar", "procesar", "calidad", "reprocesar", "calidad2",
+            "lista", "saldo", "entregar",
+        )
+
+        fechas = self.fechas(datos)
+        self.assertNotIn(None, fechas.values())
+        self.assertEqual(fechas["En proceso"], "2026-11-11T10:00:00-05:00")
+        self.assertEqual(fechas["Control de calidad"], "2026-11-11T12:00:00-05:00")
+        self.assertIn("Volvio a proceso", self.etiquetas(datos))
+        self.assertEqual(self.etiquetas(datos)[-1], "Entregada")
+
+    def test_reprocesar_desde_la_entrega_deja_pendiente_lo_posterior_a_en_proceso(self):
+        self.recorrer("abono", "clasificar", "asignar", "procesar", "calidad", "lista", "saldo")
+        self.client.force_authenticate(User.objects.get(username="admin"))
+        prenda = Prenda.objects.get(orden__codigo=self.codigo)
+        self.en(hora(12, 9), "post", self.url + "/entrega", {"prendas": [
+            {"prenda": prenda.pk, "resultado": "novedad", "observacion": "Boton suelto", "foto": data_url(JPEG)},
+        ]})
+        self.en(hora(12, 10), "post", self.url + "/decision", {
+            "decision": "reprocesar_con_descuento", "observacion": "Ana pide rehacerla", "operario": self.operario.pk,
+        })
+        self.client.force_authenticate(None)
+
+        datos = self.consultar(self.codigo).json()
+
+        fechas = self.fechas(datos)
+        self.assertEqual(datos["etapa_actual"], "En proceso")
+        self.assertEqual(fechas["En proceso"], "2026-11-12T10:00:00-05:00")
+        for etapa in ("Control de calidad", "Lista para entrega", "Entregada"):
+            self.assertIsNone(fechas[etapa], etapa)
+        self.assertEqual(self.etiquetas(datos)[-2:], ["Novedad en una prenda", "Volvio a proceso"])
+
+    def test_la_novedad_con_decision_continuar_devuelve_la_orden_a_su_etapa(self):
+        self.recorrer("abono", "clasificar", "asignar", "procesar", "calidad")
+
+        datos = self.novedad_y_decision("continuar")
+
+        fechas = self.fechas(datos)
+        self.assertEqual((datos["estado"], datos["con_novedad"]), ("Control de calidad", False))
+        self.assertEqual(datos["etapa_actual"], "Control de calidad")
+        self.assertEqual(fechas["Control de calidad"], "2026-11-11T11:00:00-05:00")
+        self.assertEqual(self.etiquetas(datos)[-2:], ["Novedad en una prenda", "En control de calidad"])
+
+    def test_la_novedad_con_agregar_servicio_vuelve_a_proceso_y_deja_pendiente_lo_posterior(self):
+        self.recorrer("abono", "clasificar", "asignar", "procesar", "calidad")
+
+        datos = self.novedad_y_decision("agregar_servicio")
+
+        fechas = self.fechas(datos)
+        self.assertEqual(datos["etapa_actual"], "En proceso")
+        self.assertEqual(fechas["En proceso"], "2026-11-11T11:00:00-05:00")
+        self.assertIsNone(fechas["Control de calidad"])
+        self.assertIsNone(fechas["Pagada"])
+        self.assertEqual(self.etiquetas(datos)[-2:], ["Novedad en una prenda", "Volvio a proceso"])
 
     def test_la_orden_cancelada_marca_la_cancelacion_y_conserva_lo_cumplido(self):
         datos = self.recorrer("abono", "cancelar")
@@ -3067,6 +3149,19 @@ class ConsultaPublicaApiTests(CatalogoDePruebaMixin, APITestCase):
         for interno in ("Ana Gomez", "admin", "op", "recepcion", "1800", "6000", "efectivo"):
             with self.subTest(interno=interno):
                 self.assertNotIn(interno, texto.replace("En proceso", "").replace(self.codigo, ""))
+
+    def test_la_respuesta_publica_no_trae_observaciones_ni_motivos(self):
+        self.recorrer("abono", "clasificar", "asignar", "procesar")
+        texto = str(self.novedad_y_decision("agregar_servicio"))
+
+        for interno in ("Mancha", "Hable con Ana", "Lavado", "4000", "Servicios agregados"):
+            with self.subTest(interno=interno):
+                self.assertNotIn(interno, texto)
+
+    def test_la_cancelacion_no_muestra_el_motivo(self):
+        texto = str(self.recorrer("abono", "cancelar"))
+
+        self.assertNotIn("retracto", texto)
 
     def test_cualquier_rol_puede_consultar(self):
         for rol in User.Rol.values:
