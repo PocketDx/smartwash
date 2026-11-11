@@ -849,12 +849,30 @@ export async function registrarPago(id: number, monto: string, metodo: MetodoPag
  * backend/ordenes/models.py). No hay rol "cliente" en accounts.User, asi que
  * el seguimiento del pedido es publico por codigo en vez de requerir login. */
 
-/** GET /ordenes/consulta/{codigo} (HU17): sin datos del cliente ni montos. La
- * busqueda es exacta; un codigo que no existe responde 404 con su mensaje. */
+export type EtapaSeguimiento =
+  | "Recibida"
+  | "Clasificada"
+  | "En proceso"
+  | "Control de calidad"
+  | "Lista para entrega"
+  | "Pagada"
+  | "Entregada";
+
+/** GET /ordenes/consulta/{codigo} (HU17): sin datos del cliente, usuarios ni montos. La
+ * busqueda es exacta; un codigo que no existe responde 404 con su mensaje. Cada etapa trae
+ * la fecha y hora (ISO con offset) en que la orden entro a ella, o null si sigue pendiente. */
 export type SeguimientoOrden = {
   codigo: string;
   estado: EstadoOrden;
   fecha_estimada_entrega: string | null;
+  /** null mientras la orden esta "En espera" (sin abono). */
+  etapa_actual: EtapaSeguimiento | null;
+  etapas: { etapa: EtapaSeguimiento; fecha: string | null }[];
+  con_novedad: boolean;
+  cancelada: boolean;
+  fecha_cancelacion: string | null;
+  /** Cambios en orden cronologico, con una etiqueta publica (p. ej. "Volvio a proceso"). */
+  eventos: { etiqueta: string; fecha: string }[];
 };
 
 export async function rastrearOrden(codigo: string): Promise<Response> {
