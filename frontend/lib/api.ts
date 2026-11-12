@@ -482,6 +482,11 @@ export type PrendaDeOrden = {
   servicios: ServicioDePrenda[];
   /** La lavanderia la dano o la perdio (HU19): ya no se cobra ni se vuelve a verificar. */
   dano: TipoDano | null;
+  /** Unidades de la linea danadas o perdidas; las demas se entregaron y se cobraron. */
+  dano_cantidad: number | null;
+  dano_valor_unitario_declarado: string | null;
+  /** Lo que se le debe al cliente por esas unidades. */
+  dano_valor_declarado: string | null;
 };
 
 /** Lo que devuelve OrdenSerializer. Los montos llegan como texto decimal. */
@@ -500,7 +505,6 @@ export type Orden = {
   descuento_dano: string;
   valor_total: string;
   abono_requerido: string;
-  duracion_estimada_dias: number;
   fecha_estimada_entrega: string | null;
   fecha_entrega: string | null;
   creado_en: string;
@@ -637,7 +641,10 @@ export type VerificacionPrenda = {
   resultado: ResultadoVerificacion;
   observacion: string;
   foto: string | null;
-  valor_declarado: string | null;
+  /** Valor de UNA unidad; el total que se le debe al cliente lo calcula el backend. */
+  valor_unitario_declarado: string | null;
+  /** Solo con dano o perdida: unidades de la linea afectadas (1 a su cantidad). */
+  cantidad_afectada: number | null;
 };
 
 /** Entrega la orden verificando cada prenda que sigue en ella (HU12). El backend
@@ -785,8 +792,9 @@ export async function asignarOperario(id: number, operario: number): Promise<Res
 
 /* ------------------------------- Danos y perdidas de prendas (HU19) ------------------------------- */
 
-/** `valor_declarado` es lo que la lavanderia le debe al cliente y no toca el
- * total de la orden; `valor_servicio` es lo que se dejo de cobrar. */
+/** `valor_declarado` es lo que la lavanderia le debe al cliente (valor de una
+ * unidad x unidades afectadas) y no toca el total de la orden; `valor_servicio`
+ * es lo que se dejo de cobrar. */
 export type DanoPrenda = {
   id: number;
   orden: number;
@@ -794,9 +802,13 @@ export type DanoPrenda = {
   cliente_nombre: string;
   prenda: number;
   prenda_nombre: string;
+  prenda_cantidad: number;
+  cantidad_afectada: number;
   tipo: TipoDano;
   tipo_nombre: string;
   descripcion: string;
+  valor_unitario_declarado: string;
+  /** Total que se le debe al cliente: valor_unitario_declarado x cantidad_afectada. */
   valor_declarado: string;
   valor_servicio: string;
   operario_nombre: string | null;
@@ -849,12 +861,40 @@ export async function registrarPago(id: number, monto: string, metodo: MetodoPag
  * backend/ordenes/models.py). No hay rol "cliente" en accounts.User, asi que
  * el seguimiento del pedido es publico por codigo en vez de requerir login. */
 
-/** GET /ordenes/consulta/{codigo} (HU17): sin datos del cliente ni montos. La
- * busqueda es exacta; un codigo que no existe responde 404 con su mensaje. */
+export type EtapaSeguimiento =
+  | "Recibida"
+  | "Clasificada"
+  | "En proceso"
+  | "Control de calidad"
+  | "Lista para entrega"
+  | "Pagada"
+  | "Entregada";
+
+/** Solo la etapa "Pagada" trae el estado del pago y sus montos, en pesos enteros: el
+ * total es lo que realmente se cobra. Si es parcial, la fecha es la del ultimo abono. */
+export type EtapaDeSeguimiento = {
+  etapa: EtapaSeguimiento;
+  fecha: string | null;
+  estado_pago?: "pendiente" | "parcial" | "completo";
+  abonado?: number;
+  total?: number;
+};
+
+/** GET /ordenes/consulta/{codigo} (HU17): sin datos del cliente, usuarios ni montos. La
+ * busqueda es exacta; un codigo que no existe responde 404 con su mensaje. Cada etapa trae
+ * la fecha y hora (ISO con offset) en que la orden entro a ella, o null si sigue pendiente. */
 export type SeguimientoOrden = {
   codigo: string;
   estado: EstadoOrden;
   fecha_estimada_entrega: string | null;
+  /** null mientras la orden esta "En espera" (sin abono). */
+  etapa_actual: EtapaSeguimiento | null;
+  etapas: EtapaDeSeguimiento[];
+  con_novedad: boolean;
+  cancelada: boolean;
+  fecha_cancelacion: string | null;
+  /** Cambios en orden cronologico, con una etiqueta publica (p. ej. "Volvio a proceso"). */
+  eventos: { etiqueta: string; fecha: string }[];
 };
 
 export async function rastrearOrden(codigo: string): Promise<Response> {

@@ -185,9 +185,6 @@ export default async function OrdenPage({
           {Number(orden.saldo_a_favor) > 0 && (
             <Dato etiqueta="Saldo a favor del cliente">{formatCOP(orden.saldo_a_favor)}</Dato>
           )}
-          <Dato etiqueta="Duracion estimada">
-            {orden.duracion_estimada_dias} {orden.duracion_estimada_dias === 1 ? "dia habil" : "dias habiles"}
-          </Dato>
           <Dato etiqueta="Fecha estimada de entrega">
             {orden.fecha_estimada_entrega ? (
               formatFecha(orden.fecha_estimada_entrega)
@@ -209,7 +206,7 @@ export default async function OrdenPage({
       <h2 className="mb-3 text-lg font-bold text-(--sw-ink)">Prendas</h2>
       <div className="flex flex-col gap-3">
         {agruparPrendas(orden.detalle_prendas, (p) =>
-          [p.dano ?? "", ...p.servicios.map((x) => `${x.servicio}:${Number(x.valor_aplicado)}`).sort()].join(","),
+          [p.dano ?? "", p.dano_cantidad ?? "", ...p.servicios.map((x) => `${x.servicio}:${Number(x.valor_aplicado)}`).sort()].join(","),
         ).map((grupo) => {
           const [prenda] = grupo.prendas;
           const detalles = detallesDe(grupo);
@@ -217,8 +214,20 @@ export default async function OrdenPage({
             <ClayCard key={prenda.id} className="p-4">
               <p className="flex flex-wrap items-center gap-2 font-semibold text-(--sw-ink)">
                 {grupo.cantidad} × {prenda.tipo_prenda_nombre}
-                {prenda.dano && <ClayBadge color="peach">{DANO[prenda.dano]} · no se cobra</ClayBadge>}
+                {prenda.dano && (
+                  <ClayBadge color="peach">
+                    {prenda.dano_cantidad !== null && prenda.dano_cantidad < prenda.cantidad
+                      ? `${DANO[prenda.dano]}: ${prenda.dano_cantidad} de ${prenda.cantidad} · no se cobran`
+                      : `${DANO[prenda.dano]} · no se cobra`}
+                  </ClayBadge>
+                )}
               </p>
+              {prenda.dano && prenda.dano_valor_declarado !== null && prenda.dano_valor_unitario_declarado !== null && (
+                <p className="mt-1 text-xs text-(--sw-ink-soft)">
+                  Se le debe al cliente {formatCOP(prenda.dano_valor_declarado)} ({prenda.dano_cantidad} ×{" "}
+                  {formatCOP(prenda.dano_valor_unitario_declarado)} por unidad).
+                </p>
+              )}
               {detalles.length > 0 && (
                 <p className="mt-0.5 text-xs text-(--sw-ink-soft)">{detalles.join(" · ")}</p>
               )}

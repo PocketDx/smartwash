@@ -1,4 +1,3 @@
-from datetime import timedelta
 from decimal import ROUND_CEILING, Decimal
 
 from django.conf import settings
@@ -17,25 +16,6 @@ from fidelizacion.models import ReglaDescuento
 PORCENTAJE_ABONO = Decimal("30")
 # Sin 0/O ni 1/I: el codigo se dicta por telefono y se copia a mano.
 ALFABETO_CODIGO = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-
-
-def duracion_estimada_dias(servicios_distintos):
-    base = getattr(settings, "ORDEN_DURACION_BASE_DIAS", Decimal("1"))
-    adicional = getattr(settings, "ORDEN_DURACION_POR_SERVICIO_ADICIONAL", Decimal("0.5"))
-    if servicios_distintos == 0:
-        return 0
-    return int((base + adicional * (servicios_distintos - 1)).to_integral_value(ROUND_CEILING))
-
-
-def sumar_dias_habiles(desde, dias):
-    # Lunes (0) a sabado (5); los festivos no se descuentan.
-    laborales = getattr(settings, "ORDEN_DIAS_LABORALES", {0, 1, 2, 3, 4, 5})
-    fecha = desde
-    while dias > 0:
-        fecha += timedelta(days=1)
-        if fecha.weekday() in laborales:
-            dias -= 1
-    return fecha
 
 
 class Orden(ModeloConAutoria):
@@ -100,7 +80,6 @@ class Orden(ModeloConAutoria):
     descuento_dano = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     valor_total = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     abono_requerido = models.DecimalField(max_digits=10, decimal_places=2, default=0)
-    duracion_estimada_dias = models.PositiveSmallIntegerField(default=0)
     # Dia en que la orden alcanzo el abono minimo y paso a "Recibida". Se
     # conserva aunque el total suba despues: el abono se exige una sola vez.
     abono_alcanzado_en = models.DateField(null=True, blank=True)
@@ -253,14 +232,13 @@ class Orden(ModeloConAutoria):
         return self.EstadoPago.PARCIAL
 
     def registrar_abono_minimo(self, fecha):
-        """La orden en espera pasa a "Recibida" y desde ese dia corre la fecha estimada."""
+        """La orden en espera pasa a "Recibida"; la fecha estimada la calcula ordenes.estimacion."""
         self.abono_alcanzado_en = fecha
         if self.estado == self.Estado.EN_ESPERA:
             self.estado = self.Estado.RECIBIDA
-        self.fecha_estimada_entrega = sumar_dias_habiles(fecha, self.duracion_estimada_dias)
 
     def recalcular(self):
-        """Valor, abono y duracion a partir de las lineas. No guarda."""
+        """Valor y abono a partir de las lineas. No guarda."""
         lineas = OrdenServicio.objects.filter(prenda__orden=self)
         self.subtotal = lineas.aggregate(total=Sum("valor_aplicado"))["total"] or Decimal("0")
         self.descuento = ReglaDescuento.objects.mayor_descuento(
@@ -270,13 +248,6 @@ class Orden(ModeloConAutoria):
         if not self.tiene_abono():
             self.abono_requerido = (self.valor_total * PORCENTAJE_ABONO / 100).to_integral_value(
                 ROUND_CEILING
-            )
-        self.duracion_estimada_dias = duracion_estimada_dias(
-            lineas.values("tarifa__servicio").distinct().count()
-        )
-        if self.tiene_abono():
-            self.fecha_estimada_entrega = sumar_dias_habiles(
-                self.abono_alcanzado_en, self.duracion_estimada_dias
             )
 
     def aplicar_descuentos_por_incidencia(self):
@@ -363,6 +334,10 @@ class Prenda(ModeloConAutoria):
 
     def valor(self):
         return self.servicios.aggregate(total=Sum("valor_aplicado"))["total"] or Decimal("0")
+
+    def valor_de_unidades(self, unidades):
+        """Lo que cuestan `unidades` de esta linea: valor_aplicado es precio unitario x cantidad."""
+        return (self.valor() * unidades / self.cantidad).quantize(Decimal("0.01"))
 
 
 class OrdenServicio(ModeloConAutoria):
@@ -629,7 +604,8 @@ class DanoPrenda(ModeloConAutoria):
     """Prenda que la lavanderia dano o perdio (HU19).
 
     valor_servicio es lo que se deja de cobrar en la orden; valor_declarado es
-    lo que la lavanderia le debe al cliente por la prenda, y no toca el total.
+    lo que la lavanderia le debe al cliente (valor de una unidad x unidades
+    afectadas), y no toca el total.
     """
 
     class Tipo(models.TextChoices):
@@ -643,7 +619,10 @@ class DanoPrenda(ModeloConAutoria):
     orden = models.ForeignKey(Orden, on_delete=models.PROTECT, related_name="danos")
     prenda = models.OneToOneField(Prenda, on_delete=models.PROTECT, related_name="dano")
     tipo = models.CharField(max_length=20, choices=Tipo.choices)
+    # Unidades de la linea afectadas; solo esas dejan de cobrarse (valor_servicio).
+    cantidad_afectada = models.PositiveIntegerField(default=1)
     descripcion = models.TextField()
+    valor_unitario_declarado = models.DecimalField(max_digits=10, decimal_places=2)
     valor_declarado = models.DecimalField(max_digits=10, decimal_places=2)
     valor_servicio = models.DecimalField(max_digits=10, decimal_places=2)
     operario = models.ForeignKey(
@@ -671,11 +650,18 @@ class DanoPrenda(ModeloConAutoria):
         constraints = [
             models.CheckConstraint(
                 condition=models.Q(valor_declarado__gt=0), name="dano_valor_declarado_positivo"
-            )
+            ),
+            models.CheckConstraint(
+                condition=models.Q(valor_unitario_declarado__gt=0),
+                name="dano_valor_unitario_declarado_positivo",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(cantidad_afectada__gt=0), name="dano_cantidad_afectada_positiva"
+            ),
         ]
 
     def __str__(self):
-        return f"{self.get_tipo_display()} · {self.orden.codigo} · {self.prenda}"
+        return f"{self.get_tipo_display()} · {self.orden.codigo} · {self.cantidad_afectada} de {self.prenda}"
 
 
 class FotoDano(FotoEnBase64):

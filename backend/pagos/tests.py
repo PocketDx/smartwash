@@ -7,7 +7,8 @@ from django.db import OperationalError
 from django.utils import timezone
 from rest_framework.test import APITestCase
 
-from ordenes.models import HistorialOrden, Orden, sumar_dias_habiles
+from ordenes.estimacion import sumar_dias_habiles
+from ordenes.models import HistorialOrden, Orden
 from ordenes.tests import CatalogoDePruebaMixin
 
 from .models import Pago

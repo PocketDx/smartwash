@@ -93,7 +93,6 @@ class OrdenAdmin(HistorialEnAltasMixin, AutoriaAdminMixin):
         "descuento_dano",
         "valor_total",
         "abono_requerido",
-        "duracion_estimada_dias",
         "fecha_estimada_entrega",
         "abono_alcanzado_en",
     )

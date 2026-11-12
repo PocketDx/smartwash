@@ -13,6 +13,7 @@ from catalogo.models import Material, Servicio, Tarifa, TipoPrenda
 from catalogo.precios import calcular_precio
 from clientes.models import Cliente
 
+from .estimacion import calcular_fecha_estimada, transiciones
 from .historial import operacion_sobre_orden, registrar_evento
 from .models import (
     ConfiguracionDescuentoNovedad,
@@ -24,7 +25,6 @@ from .models import (
     Orden,
     OrdenServicio,
     Prenda,
-    sumar_dias_habiles,
 )
 
 Evento = HistorialOrden.TipoEvento
@@ -186,6 +186,9 @@ class PrendaSerializer(serializers.ModelSerializer):
     material_nombre = serializers.CharField(source="material.nombre", read_only=True, allow_null=True)
     servicios = OrdenServicioSerializer(many=True, read_only=True)
     dano = serializers.SerializerMethodField()
+    dano_cantidad = serializers.SerializerMethodField()
+    dano_valor_unitario_declarado = serializers.SerializerMethodField()
+    dano_valor_declarado = serializers.SerializerMethodField()
 
     class Meta:
         model = Prenda
@@ -203,14 +206,39 @@ class PrendaSerializer(serializers.ModelSerializer):
             "estado_inicial",
             "servicios",
             "dano",
+            "dano_cantidad",
+            "dano_valor_unitario_declarado",
+            "dano_valor_declarado",
         )
 
     def get_dano(self, prenda) -> str | None:
         return prenda.dano.tipo if hasattr(prenda, "dano") else None
 
+    def get_dano_cantidad(self, prenda) -> int | None:
+        return prenda.dano.cantidad_afectada if hasattr(prenda, "dano") else None
+
+    # Como texto, igual que los DecimalField de la API.
+    def get_dano_valor_unitario_declarado(self, prenda) -> str | None:
+        return str(prenda.dano.valor_unitario_declarado) if hasattr(prenda, "dano") else None
+
+    def get_dano_valor_declarado(self, prenda) -> str | None:
+        return str(prenda.dano.valor_declarado) if hasattr(prenda, "dano") else None
+
+
+class FechaEstimadaField(serializers.Field):
+    """La fecha estimada vigente, calculada al leer: el campo guardado es solo una cache."""
+
+    def __init__(self, **kwargs):
+        super().__init__(source="*", read_only=True, **kwargs)
+
+    def to_representation(self, orden):
+        fecha = calcular_fecha_estimada(orden)
+        return fecha.isoformat() if fecha else None
+
 
 class OrdenSerializer(serializers.ModelSerializer):
     cliente = serializers.PrimaryKeyRelatedField(queryset=Cliente.objects.all())
+    fecha_estimada_entrega = FechaEstimadaField()
     cliente_nombre = serializers.CharField(source="cliente.nombre_completo", read_only=True)
     prendas = PrendaEntradaSerializer(
         many=True,
@@ -240,7 +268,6 @@ class OrdenSerializer(serializers.ModelSerializer):
             "descuento_dano",
             "valor_total",
             "abono_requerido",
-            "duracion_estimada_dias",
             "fecha_estimada_entrega",
             "fecha_entrega",
             "motivo_cancelacion",
@@ -542,10 +569,8 @@ def registrar_decision(orden, datos, usuario):
         )
         # El abono ya se exigio: lo nuevo se suma al saldo y el trabajo extra corre desde hoy.
         orden.recalcular()
-        orden.fecha_estimada_entrega = sumar_dias_habiles(
-            timezone.localdate(), orden.duracion_estimada_dias
-        )
         orden.estado = Orden.Estado.EN_PROCESO
+        orden.fecha_estimada_entrega = calcular_fecha_estimada(orden, entrada=timezone.now())
     elif decision == Novedad.Decision.ENTREGAR_CON_DESCUENTO:
         gravedades = {g["novedad"]: g["gravedad"] for g in datos.get("gravedades", [])}
         if sorted(gravedades) != sorted(n.pk for n in novedades):
@@ -708,9 +733,12 @@ class VerificacionPrendaSerializer(serializers.Serializer):
     coincide = serializers.BooleanField(required=False)
     observacion = serializers.CharField(required=False, allow_blank=True, default="")
     foto = FotoField(required=False, allow_null=True, default=None)
-    valor_declarado = serializers.DecimalField(
-        max_digits=10, decimal_places=2, min_value=Decimal("1"), required=False, allow_null=True
+    # El total que se le debe al cliente lo calcula el backend; un valor_declarado enviado se ignora.
+    valor_unitario_declarado = serializers.DecimalField(
+        max_digits=10, decimal_places=2, required=False, allow_null=True
     )
+    # Solo para dano o perdida; sin ella se toma la linea completa.
+    cantidad_afectada = serializers.IntegerField(min_value=1, required=False, allow_null=True)
 
     def validate(self, attrs):
         resultado = attrs.get("resultado")
@@ -732,8 +760,12 @@ class VerificacionPrendaSerializer(serializers.Serializer):
                 faltan["foto"] = "Una prenda perdida no lleva foto."
         elif attrs["foto"] is None:
             faltan["foto"] = "La fotografia es obligatoria cuando la prenda no coincide."
-        if resultado in DanoPrenda.Tipo.values and not attrs.get("valor_declarado"):
-            faltan["valor_declarado"] = "Indica el valor de la prenda que declara el cliente."
+        if resultado in DanoPrenda.Tipo.values:
+            valor = attrs.get("valor_unitario_declarado")
+            if valor is None:
+                faltan["valor_unitario_declarado"] = "Indica el valor de una unidad que declara el cliente."
+            elif valor <= 0:
+                faltan["valor_unitario_declarado"] = "El valor de una unidad debe ser mayor que 0."
         if faltan:
             raise serializers.ValidationError(faltan)
         return attrs
@@ -766,21 +798,40 @@ class EntregaSerializer(serializers.Serializer):
             if v["resultado"] == ResultadoVerificacion.NOVEDAD:
                 novedades.append((prenda, v["observacion"], v["foto"]))
             elif v["resultado"] in DanoPrenda.Tipo.values:
-                danos.append((prenda, v["resultado"], v["observacion"], v["foto"], v["valor_declarado"]))
+                cantidad = v.get("cantidad_afectada") or prenda.cantidad
+                if cantidad > prenda.cantidad:
+                    raise serializers.ValidationError(
+                        {
+                            "cantidad_afectada": f'"{prenda}" tiene {prenda.cantidad} unidades: '
+                            f"indica entre 1 y {prenda.cantidad}."
+                        }
+                    )
+                danos.append(
+                    (
+                        prenda,
+                        v["resultado"],
+                        v["observacion"],
+                        v["foto"],
+                        v["valor_unitario_declarado"],
+                        cantidad,
+                    )
+                )
         return novedades, danos
 
 
 def registrar_danos(orden, danos, usuario):
     """Deja de cobrar el servicio de cada prenda danada o perdida y registra lo que se le debe al cliente."""
     resumen = []
-    for prenda, tipo, descripcion, foto, valor_declarado in danos:
+    for prenda, tipo, descripcion, foto, valor_unitario, cantidad in danos:
         dano = DanoPrenda(
             orden=orden,
             prenda=prenda,
             tipo=tipo,
+            cantidad_afectada=cantidad,
             descripcion=descripcion,
-            valor_declarado=valor_declarado,
-            valor_servicio=prenda.valor(),
+            valor_unitario_declarado=valor_unitario,
+            valor_declarado=valor_unitario * cantidad,
+            valor_servicio=prenda.valor_de_unidades(cantidad),
             operario=orden.operario,
         )
         dano.registrar_autoria(usuario)
@@ -791,8 +842,9 @@ def registrar_danos(orden, danos, usuario):
             foto.save()
         responsable = nombre_usuario(orden.operario) if orden.operario else "sin operario"
         resumen.append(
-            f"{dano.get_tipo_display()} de {prenda}: {descripcion}. Servicio descontado "
-            f"${dano.valor_servicio}; valor de la prenda ${valor_declarado}, a pagar al cliente. "
+            f"{dano.get_tipo_display()} de {cantidad} de {prenda}: {descripcion}. Servicio descontado "
+            f"${dano.valor_servicio}; valor declarado ${valor_unitario} por unidad, "
+            f"${dano.valor_declarado} a pagar al cliente. "
             f"Operario: {responsable}"
         )
     orden.aplicar_descuentos_por_incidencia()
@@ -833,6 +885,7 @@ class PrendaBandejaSerializer(serializers.ModelSerializer):
 class OrdenBandejaSerializer(serializers.ModelSerializer):
     # Sin cliente ni valores: el operario solo necesita saber que procesar y para cuando.
     prendas = PrendaBandejaSerializer(many=True, read_only=True)
+    fecha_estimada_entrega = FechaEstimadaField()
 
     class Meta:
         model = Orden
@@ -840,12 +893,144 @@ class OrdenBandejaSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
+ETAPAS_FLUJO = (
+    Orden.Estado.RECIBIDA,
+    Orden.Estado.CLASIFICADA,
+    Orden.Estado.EN_PROCESO,
+    Orden.Estado.CONTROL_CALIDAD,
+    Orden.Estado.LISTA,
+)
+ETAPA_PAGADA = "Pagada"
+ETAPAS_SEGUIMIENTO = (*ETAPAS_FLUJO, ETAPA_PAGADA, Orden.Estado.ENTREGADA)
+def estado_del_pago(orden):
+    """(estado, abonado, total, momento) segun los pagos registrados.
+
+    El total es valor_total, lo que realmente se cobra: ya descuenta fidelizacion,
+    novedades y servicios de prendas danadas o perdidas, e incluye los servicios agregados.
+    El momento es el del ultimo abono si es parcial, o el del pago que completo el total.
+    """
+    pagos = list(orden.pagos.all())
+    abonado = sum((pago.monto for pago in pagos), Decimal("0"))
+    total = orden.valor_total
+    if not pagos:
+        return "pendiente", abonado, total, None
+    if abonado < total:
+        return "parcial", abonado, total, pagos[-1].creado_en
+    acumulado = Decimal("0")
+    for pago in pagos:
+        acumulado += pago.monto
+        if acumulado >= total:
+            return "completo", abonado, total, pago.creado_en
+    return "completo", abonado, total, pagos[-1].creado_en
+
+
+def pesos(valor):
+    return int(valor.to_integral_value())
+
+
+def etapa_en_el_flujo(orden):
+    """La etapa del flujo en la que esta la orden; con novedad, la etapa desde la que se detuvo."""
+    estado = orden.estado
+    if estado == Orden.Estado.CANCELADA:
+        anterior = orden.historial.filter(tipo_evento=Evento.CANCELACION).last()
+        estado = anterior.detalle.partition(" → ")[0] if anterior else Orden.Estado.EN_ESPERA
+    if estado == Orden.Estado.CON_NOVEDAD:
+        ultima = orden.novedades.order_by("creado_en", "id").last()
+        estado = ultima.estado_anterior if ultima else Orden.Estado.EN_PROCESO
+    return estado if estado in ETAPAS_SEGUIMIENTO else None
+
+
+ETIQUETA_PUBLICA = {
+    Orden.Estado.RECIBIDA: "Orden recibida",
+    Orden.Estado.CLASIFICADA: "Prendas clasificadas",
+    Orden.Estado.EN_PROCESO: "En proceso",
+    Orden.Estado.CONTROL_CALIDAD: "En control de calidad",
+    Orden.Estado.LISTA: "Lista para entrega",
+    Orden.Estado.CON_NOVEDAD: "Novedad en una prenda",
+    Orden.Estado.ENTREGADA: "Entregada",
+    Orden.Estado.CANCELADA: "Cancelada",
+}
+
+
+def eventos_publicos(cambios):
+    eventos, en_proceso_antes = [], False
+    for momento, destino in cambios:
+        etiqueta = ETIQUETA_PUBLICA.get(destino)
+        if etiqueta is None:
+            continue
+        if destino == Orden.Estado.EN_PROCESO:
+            if en_proceso_antes:
+                etiqueta = "Volvio a proceso"
+            en_proceso_antes = True
+        eventos.append((etiqueta, momento))
+    return eventos
+
+
 class ConsultaPublicaSerializer(serializers.ModelSerializer):
-    # Publica: sin cliente, montos ni id interno.
+    """Publica: solo codigo, estado, etapas y fechas; sin cliente, usuarios, montos, motivos ni ids."""
+
+    fecha_estimada_entrega = FechaEstimadaField()
+
     class Meta:
         model = Orden
         fields = ("codigo", "estado", "fecha_estimada_entrega")
         read_only_fields = fields
+
+    def to_representation(self, orden):
+        datos = super().to_representation(orden)
+        fecha = serializers.DateTimeField().to_representation
+        cambios = transiciones(orden)
+        entradas = dict((destino, momento) for momento, destino in cambios)
+        if orden.estado != Orden.Estado.EN_ESPERA and Orden.Estado.RECIBIDA not in entradas:
+            # Ordenes anteriores a la regla del abono: nacieron recibidas.
+            creacion = orden.historial.filter(tipo_evento=Evento.CREACION).first()
+            if creacion and (
+                orden.estado != Orden.Estado.CANCELADA or orden.abono_alcanzado_en is not None
+            ):
+                entradas[Orden.Estado.RECIBIDA] = creacion.fecha
+
+        # Una etapa solo cuenta si ocurrio despues de la ultima entrada a una etapa anterior:
+        # al volver a "En proceso", lo posterior queda pendiente hasta que ocurra de nuevo.
+        fechas, ultima_previa = {}, None
+        for etapa in (*ETAPAS_FLUJO, Orden.Estado.ENTREGADA):
+            momento = entradas.get(etapa)
+            if momento and ultima_previa and momento < ultima_previa:
+                momento = None
+            fechas[etapa] = momento
+            if entradas.get(etapa) and (ultima_previa is None or entradas[etapa] > ultima_previa):
+                ultima_previa = entradas[etapa]
+        # Pagada depende de lo pagado, no del orden del flujo: si el total sube, vuelve a pendiente.
+        estado_pago, abonado, total, fechas[ETAPA_PAGADA] = estado_del_pago(orden)
+
+        cancelada = orden.estado == Orden.Estado.CANCELADA
+        datos.update(
+            etapa_actual=etapa_en_el_flujo(orden),
+            etapas=[
+                {
+                    "etapa": etapa,
+                    "fecha": fecha(fechas[etapa]) if fechas[etapa] else None,
+                    # Solo la etapa de pago lleva montos, en pesos enteros; nada de metodos ni ids.
+                    **(
+                        {"estado_pago": estado_pago, "abonado": pesos(abonado), "total": pesos(total)}
+                        if etapa == ETAPA_PAGADA
+                        else {}
+                    ),
+                }
+                for etapa in ETAPAS_SEGUIMIENTO
+            ],
+            con_novedad=orden.estado == Orden.Estado.CON_NOVEDAD,
+            cancelada=cancelada,
+            fecha_cancelacion=(
+                fecha(entradas[Orden.Estado.CANCELADA])
+                if cancelada and Orden.Estado.CANCELADA in entradas
+                else None
+            ),
+            eventos=[
+                {"etiqueta": etiqueta, "fecha": fecha(momento)}
+                for etiqueta, momento in eventos_publicos(cambios)
+            ],
+        )
+        return datos
 
 
 class OrdenHistorialClienteSerializer(serializers.ModelSerializer):
@@ -927,6 +1112,7 @@ class DanoPrendaSerializer(serializers.ModelSerializer):
     orden_codigo = serializers.CharField(source="orden.codigo", read_only=True)
     cliente_nombre = serializers.CharField(source="orden.cliente.nombre_completo", read_only=True)
     prenda_nombre = serializers.CharField(source="prenda.__str__", read_only=True)
+    prenda_cantidad = serializers.IntegerField(source="prenda.cantidad", read_only=True)
     tipo_nombre = serializers.CharField(source="get_tipo_display", read_only=True)
     estado_nombre = serializers.CharField(source="get_estado_display", read_only=True)
     operario_nombre = serializers.SerializerMethodField()
@@ -943,9 +1129,12 @@ class DanoPrendaSerializer(serializers.ModelSerializer):
             "cliente_nombre",
             "prenda",
             "prenda_nombre",
+            "prenda_cantidad",
+            "cantidad_afectada",
             "tipo",
             "tipo_nombre",
             "descripcion",
+            "valor_unitario_declarado",
             "valor_declarado",
             "valor_servicio",
             "operario_nombre",
