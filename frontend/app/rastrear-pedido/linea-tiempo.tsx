@@ -1,4 +1,5 @@
-import type { SeguimientoOrden } from "@/lib/api";
+import type { EtapaDeSeguimiento, SeguimientoOrden } from "@/lib/api";
+import { formatCOP } from "@/lib/format";
 
 const ZONA_HORARIA = "America/Bogota";
 const FECHA_HORA = new Intl.DateTimeFormat("es-CO", {
@@ -27,16 +28,29 @@ export function fechaLarga(dia: string): string {
   return FECHA_LARGA.format(new Date(`${dia}T12:00:00-05:00`));
 }
 
+// Un pago parcial tiene fecha (la del ultimo abono) pero no cuenta como etapa completada.
+function completada(etapa: EtapaDeSeguimiento | undefined) {
+  return etapa?.fecha != null && etapa.estado_pago !== "parcial";
+}
+
+function nombre(etapa: EtapaDeSeguimiento) {
+  if (etapa.estado_pago === "parcial") return "Pagada (parcial)";
+  if (etapa.estado_pago === "completo") return "Pagada completa";
+  return etapa.etapa;
+}
+
 export default function LineaTiempo({ orden }: { orden: SeguimientoOrden }) {
   const { etapas, etapa_actual: actual } = orden;
 
   return (
     // Vertical tambien en escritorio: en el ancho de la tarjeta, siete etapas en fila no se leen.
     <ol aria-label="Etapas de tu pedido" className="flex flex-col">
-      {etapas.map(({ etapa, fecha }, i) => {
-        const hecha = fecha !== null;
+      {etapas.map((paso, i) => {
+        const { etapa, fecha } = paso;
+        const hecha = completada(paso);
+        const parcial = paso.estado_pago === "parcial";
         const esActual = etapa === actual && !orden.cancelada;
-        const tramoPintado = hecha && etapas[i + 1]?.fecha != null;
+        const tramoPintado = hecha && completada(etapas[i + 1]);
         return (
           <li
             key={etapa}
@@ -56,25 +70,40 @@ export default function LineaTiempo({ orden }: { orden: SeguimientoOrden }) {
               className={`relative z-10 flex h-7 w-7 shrink-0 items-center justify-center rounded-full border-2 text-xs font-extrabold ${
                 hecha
                   ? "border-(--sw-line) bg-(--sw-accent) text-(--sw-on-accent)"
-                  : "border-(--sw-hairline) bg-(--sw-surface) text-(--sw-ink-soft)"
+                  : parcial
+                    ? "border-(--sw-line) bg-(--sw-sun) text-(--sw-on-accent)"
+                    : "border-(--sw-hairline) bg-(--sw-surface) text-(--sw-ink-soft)"
               } ${esActual ? "ring-4 ring-(--sw-accent)/40" : ""}`}
             >
-              {hecha ? "✓" : i + 1}
+              {hecha ? "✓" : parcial ? "$" : i + 1}
             </span>
             <div className="min-w-0 pt-0.5">
-              <p className={`text-sm leading-tight ${hecha ? "font-bold text-(--sw-ink)" : "text-(--sw-ink-soft)"}`}>
-                {etapa}
+              <p
+                className={`text-sm leading-tight ${hecha || parcial ? "font-bold text-(--sw-ink)" : "text-(--sw-ink-soft)"}`}
+              >
+                {nombre(paso)}
+                {parcial && paso.abonado !== undefined && paso.total !== undefined && (
+                  <span className="font-normal text-(--sw-ink-soft)">
+                    {" "}
+                    · Abono: {formatCOP(paso.abonado)} · Total: {formatCOP(paso.total)}
+                  </span>
+                )}
               </p>
               <p className="mt-0.5 text-xs text-(--sw-ink-soft)">
                 {fecha ? (
                   <>
-                    <span className="sr-only">Completada el </span>
+                    <span className="sr-only">{parcial ? "Ultimo abono el " : "Completada el "}</span>
                     {fechaYHora(fecha)}
                   </>
                 ) : (
                   "Pendiente"
                 )}
               </p>
+              {parcial && paso.abonado !== undefined && paso.total !== undefined && (
+                <p className="mt-0.5 text-xs font-semibold text-(--sw-ink)">
+                  Saldo pendiente: {formatCOP(Math.max(paso.total - paso.abonado, 0))}
+                </p>
+              )}
               {esActual && <p className="mt-0.5 text-xs font-extrabold text-(--sw-accent-text)">Etapa actual</p>}
             </div>
           </li>
