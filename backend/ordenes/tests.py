@@ -25,6 +25,7 @@ from fidelizacion.models import ReglaDescuento
 from .estimacion import calcular_fecha_estimada, horas_en_proceso, sumar_dias_habiles
 from .historial import OperacionNoCompletada, operacion_sobre_orden, registrar_evento
 from .models import (
+    Comprobante,
     CambioConfiguracionDescuento,
     ConfiguracionDescuentoNovedad,
     DanoPrenda,
@@ -4147,4 +4148,216 @@ class FechaEstimadaEnLaApiTests(CatalogoDePruebaMixin, APITestCase):
             texto = str(respuesta).lower()
             for interno in ("duracion", "horas", "margen"):
                 self.assertNotIn(interno, texto)
+
+
+class ComprobanteAlAbonarTests(CatalogoDePruebaMixin, APITestCase):
+    def setUp(self):
+        self.crear_catalogo()
+        self.client.force_authenticate(self.recepcionista)
+        # Una camisa de algodon de 2,5 kg con lavado (4000/kg = 10000) y planchado (6000).
+        self.orden = Orden.objects.get(
+            pk=self.registrar(self.prenda(self.lavado, self.planchado)).json()["id"]
+        )
+
+    def pagar(self, monto, metodo="efectivo"):
+        return self.client.post(
+            f"/api/ordenes/{self.orden.pk}/pagos", {"monto": monto, "metodo": metodo}, format="json"
+        )
+
+    def test_al_alcanzar_el_abono_minimo_se_genera_el_comprobante_de_abono(self):
+        self.pagar("5000")
+
+        comprobante = Comprobante.objects.get()
+        self.orden.refresh_from_db()
+        self.assertEqual((comprobante.orden, comprobante.tipo), (self.orden, Comprobante.Tipo.ABONO))
+        contenido = comprobante.contenido
+        self.assertEqual(
+            {k: v for k, v in contenido.items() if k not in ("prendas", "pagos")},
+            {
+                "codigo": self.orden.codigo,
+                "cliente": "Ana Gomez",
+                "subtotal": "16000.00",
+                "descuento": "0.00",
+                "total_servicio": "16000.00",
+                "total_pagado": "5000.00",
+                "saldo_pendiente": "11000.00",
+                "fecha_estimada_entrega": self.orden.fecha_estimada_entrega.isoformat(),
+            },
+        )
+        self.assertEqual(
+            contenido["prendas"],
+            [
+                {
+                    "tipo_prenda": "Camisa",
+                    "material": "Algodon",
+                    "cantidad": 1,
+                    "servicios": [
+                        {"servicio": "Lavado", "valor": "10000.00"},
+                        {"servicio": "Planchado", "valor": "6000.00"},
+                    ],
+                    "valor": "16000.00",
+                }
+            ],
+        )
+        self.assertEqual(len(contenido["pagos"]), 1)
+        self.assertEqual(
+            (contenido["pagos"][0]["metodo"], contenido["pagos"][0]["monto"]), ("Efectivo", "5000.00")
+        )
+        self.assertRegex(contenido["pagos"][0]["fecha"], r"-05:00$")
+
+    def test_un_pago_por_debajo_del_abono_no_genera_comprobante(self):
+        self.pagar("1000")
+
+        self.assertFalse(Comprobante.objects.exists())
+
+    def test_el_comprobante_queda_congelado_aunque_despues_haya_mas_pagos_o_cambien_las_tarifas(self):
+        self.pagar("5000")
+        antes = Comprobante.objects.get().contenido
+
+        self.pagar("3000", "tarjeta")
+        Tarifa.objects.filter(servicio=self.planchado).update(valor_base=Decimal("9000"))
+
+        self.assertEqual(Comprobante.objects.count(), 1)
+        self.assertEqual(Comprobante.objects.get().contenido, antes)
+
+    def test_si_falla_el_comprobante_no_se_registra_el_pago_ni_cambia_el_estado(self):
+        with mock.patch(
+            "ordenes.comprobantes.Comprobante.save", side_effect=OperationalError("sin conexion")
+        ), self.assertLogs("ordenes.historial", level="ERROR"):
+            response = self.pagar("5000")
+
+        self.assertEqual(response.status_code, 503)
+        self.orden.refresh_from_db()
+        self.assertEqual(self.orden.estado, Orden.Estado.EN_ESPERA)
+        self.assertEqual(self.orden.total_pagado(), 0)
+        self.assertFalse(Comprobante.objects.exists())
+
+    def test_una_orden_cancelada_no_genera_comprobante(self):
+        self.client.post(
+            f"/api/ordenes/{self.orden.pk}/cancelacion", {"motivo": "Se retracto"}, format="json"
+        )
+
+        self.assertFalse(Comprobante.objects.exists())
+
+
+class ComprobanteAlEntregarTests(EntregaEnMostradorMixin, APITestCase):
+    def setUp(self):
+        super().setUp()
+        self.lista_para_entregar()
+
+    def comprobantes(self, usuario=None):
+        self.client.force_authenticate(usuario or self.recepcionista)
+        return self.client.get(f"/api/ordenes/{self.orden.pk}/comprobantes")
+
+    def test_al_entregar_se_genera_el_comprobante_con_los_pagos_y_el_estado(self):
+        self.entregar(self.coincide(self.camisa_1), self.coincide(self.camisa_2))
+
+        comprobante = Comprobante.objects.get(tipo=Comprobante.Tipo.ENTREGA)
+        contenido = comprobante.contenido
+        self.assertEqual(
+            (contenido["estado"], contenido["estado_pago"], contenido["total_servicio"], contenido["total_pagado"]),
+            ("Entregada", "Pagada", "12000.00", "12000.00"),
+        )
+        self.assertTrue(contenido["fecha_entrega"])
+        self.assertEqual([p["monto"] for p in contenido["pagos"]], ["12000.00"])
+        self.assertEqual([p["observaciones"] for p in contenido["prendas"]], [[], []])
+        self.assertEqual(contenido["prendas"][0]["servicios"], [{"servicio": "Planchado", "valor": "6000.00"}])
+
+    def test_el_comprobante_de_entrega_lista_las_observaciones_de_cada_prenda(self):
+        self.client.force_authenticate(self.recepcionista)
+        Orden.objects.filter(pk=self.orden.pk).update(estado=Orden.Estado.EN_PROCESO)
+        self.client.force_authenticate(self.operario)
+        self.client.post(
+            f"/api/ordenes/{self.orden.pk}/novedades",
+            {"prenda": self.camisa_2.pk, "descripcion": "Mancha de tinta", "foto": data_url(JPEG)},
+            format="json",
+        )
+        self.client.force_authenticate(self.recepcionista)
+        self.client.post(
+            f"/api/ordenes/{self.orden.pk}/decision",
+            {"decision": "continuar", "observacion": "Ana autoriza"},
+            format="json",
+        )
+        Orden.objects.filter(pk=self.orden.pk).update(estado=Orden.Estado.LISTA)
+
+        response = self.entregar(self.perdida(self.camisa_1), self.coincide(self.camisa_2))
+
+        self.assertEqual(response.status_code, 200, response.json())
+        prendas = Comprobante.objects.get(tipo=Comprobante.Tipo.ENTREGA).contenido["prendas"]
+        self.assertEqual(
+            [p["observaciones"] for p in prendas],
+            [["Pérdida: No aparece en la bodega"], ["Mancha de tinta"]],
+        )
+
+    def test_entregar_con_descuento_tambien_genera_el_comprobante(self):
+        self.entregar(self.novedad(self.camisa_1), self.coincide(self.camisa_2))
+        self.client.force_authenticate(self.recepcionista)
+        novedad = Novedad.objects.get()
+        self.client.post(
+            f"/api/ordenes/{self.orden.pk}/decision",
+            {
+                "decision": "entregar_con_descuento",
+                "observacion": "Ana acepta",
+                "gravedades": [{"novedad": novedad.pk, "gravedad": "leve"}],
+            },
+            format="json",
+        )
+
+        contenido = Comprobante.objects.get(tipo=Comprobante.Tipo.ENTREGA).contenido
+        self.assertEqual(contenido["estado"], "Entregada")
+        self.assertEqual(contenido["prendas"][0]["observaciones"], ["Costura desviada en el puno"])
+
+    def test_la_recepcionista_y_el_administrador_pueden_volver_a_ver_los_comprobantes(self):
+        self.entregar(self.coincide(self.camisa_1), self.coincide(self.camisa_2))
+
+        for usuario in (self.recepcionista, self.admin):
+            with self.subTest(usuario=usuario.username):
+                response = self.comprobantes(usuario)
+
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(
+                    [(c["tipo"], c["tipo_nombre"]) for c in response.json()],
+                    [("entrega", "Comprobante de entrega")],
+                )
+                self.assertEqual(response.json()[0]["contenido"]["codigo"], self.orden.codigo)
+
+    def test_el_operario_y_quien_no_tiene_sesion_no_ven_los_comprobantes(self):
+        self.assertEqual(self.comprobantes(self.operario).status_code, 403)
+        self.client.force_authenticate(None)
+        self.assertEqual(self.client.get(f"/api/ordenes/{self.orden.pk}/comprobantes").status_code, 403)
+
+    def test_si_falla_el_comprobante_la_orden_no_se_entrega(self):
+        with mock.patch(
+            "ordenes.comprobantes.Comprobante.save", side_effect=OperationalError("sin conexion")
+        ), self.assertLogs("ordenes.historial", level="ERROR"):
+            response = self.entregar(self.coincide(self.camisa_1), self.coincide(self.camisa_2))
+
+        self.assertEqual(response.status_code, 503)
+        self.orden.refresh_from_db()
+        self.assertEqual(self.orden.estado, Orden.Estado.LISTA)
+        self.assertFalse(Comprobante.objects.exists())
+        self.assertFalse(self.eventos(Evento.ENTREGA).exists())
+
+
+class ComprobanteInmutableTests(TestCase):
+    def setUp(self):
+        self.orden = crear_orden()
+        self.comprobante = Comprobante.objects.create(
+            orden=self.orden, tipo=Comprobante.Tipo.ABONO, contenido={"codigo": self.orden.codigo}
+        )
+
+    def test_no_se_puede_editar_ni_borrar(self):
+        self.comprobante.contenido = {"codigo": "otro"}
+        with self.assertRaises(PermissionDenied):
+            self.comprobante.save()
+        with self.assertRaises(PermissionDenied):
+            self.comprobante.delete()
+        with self.assertRaises(PermissionDenied):
+            Comprobante.objects.update(contenido={})
+        with self.assertRaises(PermissionDenied):
+            Comprobante.objects.all().delete()
+
+    def test_solo_hay_un_comprobante_de_cada_tipo_por_orden(self):
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            Comprobante.objects.create(orden=self.orden, tipo=Comprobante.Tipo.ABONO, contenido={})
 

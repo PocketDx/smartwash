@@ -26,9 +26,11 @@ from core.permissions import (
 from fidelizacion.models import puntos_por_consumo
 
 from .avisos import avisar_orden_lista
+from .comprobantes import generar_comprobante
 from .historial import operacion_sobre_orden, registrar_evento
 from .models import (
     CambioConfiguracionDescuento,
+    Comprobante,
     ConfiguracionDescuentoNovedad,
     DanoPrenda,
     FotoDano,
@@ -40,6 +42,7 @@ from .models import (
     clasificacion_por_consumo,
 )
 from .serializers import (
+    ComprobanteSerializer,
     AgregarServicioSerializer,
     AsignacionSerializer,
     CambioEstadoSerializer,
@@ -271,6 +274,19 @@ def entregar_orden(orden, usuario, detalle):
             f"${saldo_a_favor} devueltos al cliente: lo pagado supera el total con "
             f"descuentos (${orden.valor_total})",
         )
+    generar_comprobante(orden, Comprobante.Tipo.ENTREGA)
+
+
+class ComprobantesOrdenView(generics.ListAPIView):
+    """Los comprobantes de la orden (HU22), tal como se generaron."""
+
+    serializer_class = ComprobanteSerializer
+    permission_classes = [AdministradorORecepcionista]
+    pagination_class = None
+
+    def get_queryset(self):
+        orden = get_object_or_404(Orden, pk=self.kwargs["pk"])
+        return orden.comprobantes.all()
 
 
 class RegistrarEntregaView(APIView):

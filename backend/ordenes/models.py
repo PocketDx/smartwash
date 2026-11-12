@@ -673,3 +673,51 @@ class FotoDano(FotoEnBase64):
 
     def __str__(self):
         return f"Foto de {self.dano}"
+
+
+MENSAJE_COMPROBANTE_INMUTABLE = "Un comprobante no se puede modificar ni eliminar."
+
+
+class ComprobanteQuerySet(models.QuerySet):
+    def update(self, **kwargs):
+        raise PermissionDenied(MENSAJE_COMPROBANTE_INMUTABLE)
+
+    def delete(self):
+        raise PermissionDenied(MENSAJE_COMPROBANTE_INMUTABLE)
+
+
+class Comprobante(models.Model):
+    """Comprobante digital de la orden (HU22): una copia congelada de lo que se le entrego al cliente.
+
+    No se crea a mano: se usa ordenes.comprobantes.generar_comprobante. Su contenido no se
+    recalcula al consultarlo, aunque despues cambien tarifas, descuentos o pagos.
+    """
+
+    class Tipo(models.TextChoices):
+        ABONO = "abono", "Comprobante de abono"
+        ENTREGA = "entrega", "Comprobante de entrega"
+
+    orden = models.ForeignKey(Orden, on_delete=models.PROTECT, related_name="comprobantes")
+    tipo = models.CharField(max_length=20, choices=Tipo.choices)
+    contenido = models.JSONField()
+    generado_en = models.DateTimeField(auto_now_add=True)
+
+    objects = ComprobanteQuerySet.as_manager()
+
+    class Meta:
+        ordering = ("generado_en", "id")
+        constraints = [
+            models.UniqueConstraint(fields=("orden", "tipo"), name="comprobante_unico_por_tipo"),
+        ]
+
+    def __str__(self):
+        return f"{self.orden.codigo} · {self.get_tipo_display()}"
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding:
+            raise PermissionDenied(MENSAJE_COMPROBANTE_INMUTABLE)
+        kwargs["force_insert"] = True
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise PermissionDenied(MENSAJE_COMPROBANTE_INMUTABLE)
