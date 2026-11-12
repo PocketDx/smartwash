@@ -22,6 +22,7 @@ from django.db import DatabaseError, transaction
 from rest_framework import serializers, status
 from rest_framework.exceptions import APIException
 
+from .estimacion import actualizar_fecha_estimada
 from .models import HistorialOrden
 
 logger = logging.getLogger(__name__)
@@ -60,6 +61,9 @@ def registrar_evento(orden, tipo_evento, usuario, detalle=""):
         )
     if usuario is not None and not usuario.is_authenticated:
         usuario = None
-    return HistorialOrden.objects.create(
+    evento = HistorialOrden.objects.create(
         orden=orden, tipo_evento=tipo_evento, usuario=usuario, detalle=detalle
     )
+    # Cada cambio de la orden deja al dia la fecha estimada que leen las alertas (HU16).
+    actualizar_fecha_estimada(orden)
+    return evento

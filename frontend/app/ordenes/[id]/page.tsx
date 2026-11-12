@@ -185,9 +185,6 @@ export default async function OrdenPage({
           {Number(orden.saldo_a_favor) > 0 && (
             <Dato etiqueta="Saldo a favor del cliente">{formatCOP(orden.saldo_a_favor)}</Dato>
           )}
-          <Dato etiqueta="Duracion estimada">
-            {orden.duracion_estimada_dias} {orden.duracion_estimada_dias === 1 ? "dia habil" : "dias habiles"}
-          </Dato>
           <Dato etiqueta="Fecha estimada de entrega">
             {orden.fecha_estimada_entrega ? (
               formatFecha(orden.fecha_estimada_entrega)

@@ -505,7 +505,6 @@ export type Orden = {
   descuento_dano: string;
   valor_total: string;
   abono_requerido: string;
-  duracion_estimada_dias: number;
   fecha_estimada_entrega: string | null;
   fecha_entrega: string | null;
   creado_en: string;
@@ -871,6 +870,16 @@ export type EtapaSeguimiento =
   | "Pagada"
   | "Entregada";
 
+/** Solo la etapa "Pagada" trae el estado del pago y sus montos, en pesos enteros: el
+ * total es lo que realmente se cobra. Si es parcial, la fecha es la del ultimo abono. */
+export type EtapaDeSeguimiento = {
+  etapa: EtapaSeguimiento;
+  fecha: string | null;
+  estado_pago?: "pendiente" | "parcial" | "completo";
+  abonado?: number;
+  total?: number;
+};
+
 /** GET /ordenes/consulta/{codigo} (HU17): sin datos del cliente, usuarios ni montos. La
  * busqueda es exacta; un codigo que no existe responde 404 con su mensaje. Cada etapa trae
  * la fecha y hora (ISO con offset) en que la orden entro a ella, o null si sigue pendiente. */
@@ -880,7 +889,7 @@ export type SeguimientoOrden = {
   fecha_estimada_entrega: string | null;
   /** null mientras la orden esta "En espera" (sin abono). */
   etapa_actual: EtapaSeguimiento | null;
-  etapas: { etapa: EtapaSeguimiento; fecha: string | null }[];
+  etapas: EtapaDeSeguimiento[];
   con_novedad: boolean;
   cancelada: boolean;
   fecha_cancelacion: string | null;

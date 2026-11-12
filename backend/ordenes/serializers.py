@@ -13,6 +13,7 @@ from catalogo.models import Material, Servicio, Tarifa, TipoPrenda
 from catalogo.precios import calcular_precio
 from clientes.models import Cliente
 
+from .estimacion import calcular_fecha_estimada, transiciones
 from .historial import operacion_sobre_orden, registrar_evento
 from .models import (
     ConfiguracionDescuentoNovedad,
@@ -24,7 +25,6 @@ from .models import (
     Orden,
     OrdenServicio,
     Prenda,
-    sumar_dias_habiles,
 )
 
 Evento = HistorialOrden.TipoEvento
@@ -225,8 +225,20 @@ class PrendaSerializer(serializers.ModelSerializer):
         return str(prenda.dano.valor_declarado) if hasattr(prenda, "dano") else None
 
 
+class FechaEstimadaField(serializers.Field):
+    """La fecha estimada vigente, calculada al leer: el campo guardado es solo una cache."""
+
+    def __init__(self, **kwargs):
+        super().__init__(source="*", read_only=True, **kwargs)
+
+    def to_representation(self, orden):
+        fecha = calcular_fecha_estimada(orden)
+        return fecha.isoformat() if fecha else None
+
+
 class OrdenSerializer(serializers.ModelSerializer):
     cliente = serializers.PrimaryKeyRelatedField(queryset=Cliente.objects.all())
+    fecha_estimada_entrega = FechaEstimadaField()
     cliente_nombre = serializers.CharField(source="cliente.nombre_completo", read_only=True)
     prendas = PrendaEntradaSerializer(
         many=True,
@@ -256,7 +268,6 @@ class OrdenSerializer(serializers.ModelSerializer):
             "descuento_dano",
             "valor_total",
             "abono_requerido",
-            "duracion_estimada_dias",
             "fecha_estimada_entrega",
             "fecha_entrega",
             "motivo_cancelacion",
@@ -558,10 +569,8 @@ def registrar_decision(orden, datos, usuario):
         )
         # El abono ya se exigio: lo nuevo se suma al saldo y el trabajo extra corre desde hoy.
         orden.recalcular()
-        orden.fecha_estimada_entrega = sumar_dias_habiles(
-            timezone.localdate(), orden.duracion_estimada_dias
-        )
         orden.estado = Orden.Estado.EN_PROCESO
+        orden.fecha_estimada_entrega = calcular_fecha_estimada(orden, entrada=timezone.now())
     elif decision == Novedad.Decision.ENTREGAR_CON_DESCUENTO:
         gravedades = {g["novedad"]: g["gravedad"] for g in datos.get("gravedades", [])}
         if sorted(gravedades) != sorted(n.pk for n in novedades):
@@ -876,6 +885,7 @@ class PrendaBandejaSerializer(serializers.ModelSerializer):
 class OrdenBandejaSerializer(serializers.ModelSerializer):
     # Sin cliente ni valores: el operario solo necesita saber que procesar y para cuando.
     prendas = PrendaBandejaSerializer(many=True, read_only=True)
+    fecha_estimada_entrega = FechaEstimadaField()
 
     class Meta:
         model = Orden
@@ -892,53 +902,30 @@ ETAPAS_FLUJO = (
 )
 ETAPA_PAGADA = "Pagada"
 ETAPAS_SEGUIMIENTO = (*ETAPAS_FLUJO, ETAPA_PAGADA, Orden.Estado.ENTREGADA)
-# Eventos cuyo detalle empieza con "Estado A → Estado B".
-EVENTOS_CON_TRANSICION = (
-    Evento.CAMBIO_ESTADO,
-    Evento.DECISION_NOVEDAD,
-    Evento.NOVEDAD,
-    Evento.ENTREGA,
-    Evento.CANCELACION,
-)
+def estado_del_pago(orden):
+    """(estado, abonado, total, momento) segun los pagos registrados.
 
-
-def estado_destino(detalle):
-    """El estado al que entro la orden segun su detalle; None si no registra un cambio de estado.
-
-    Se toma la ultima flecha con un estado a cada lado: el detalle puede traer otras, como la
-    observacion de una decision o "Cliente: Ocasional → Frecuente" en la entrega.
+    El total es valor_total, lo que realmente se cobra: ya descuenta fidelizacion,
+    novedades y servicios de prendas danadas o perdidas, e incluye los servicios agregados.
+    El momento es el del ultimo abono si es parcial, o el del pago que completo el total.
     """
-    partes = detalle.split(" → ")
-    destino = None
-    for antes, despues in zip(partes, partes[1:]):
-        origen = next((e for e in Orden.Estado.values if antes.endswith(e)), None)
-        llegada = next((e for e in Orden.Estado.values if despues.startswith(e)), None)
-        if origen and llegada:
-            destino = llegada
-    return destino
-
-
-def transiciones(orden):
-    """(fecha, estado destino) de cada cambio de estado del historial, en orden cronologico.
-
-    Incluye los que registran las novedades ("Con novedad → En proceso") y la entrega.
-    """
-    return [
-        (evento.fecha, destino)
-        for evento in orden.historial.filter(tipo_evento__in=EVENTOS_CON_TRANSICION)
-        if (destino := estado_destino(evento.detalle))
-    ]
-
-
-def momento_de_pago_completo(orden):
-    if orden.valor_total <= 0 or orden.total_pagado() < orden.valor_total:
-        return None
+    pagos = list(orden.pagos.all())
+    abonado = sum((pago.monto for pago in pagos), Decimal("0"))
+    total = orden.valor_total
+    if not pagos:
+        return "pendiente", abonado, total, None
+    if abonado < total:
+        return "parcial", abonado, total, pagos[-1].creado_en
     acumulado = Decimal("0")
-    for pago in orden.pagos.all():
+    for pago in pagos:
         acumulado += pago.monto
-        if acumulado >= orden.valor_total:
-            return pago.creado_en
-    return None
+        if acumulado >= total:
+            return "completo", abonado, total, pago.creado_en
+    return "completo", abonado, total, pagos[-1].creado_en
+
+
+def pesos(valor):
+    return int(valor.to_integral_value())
 
 
 def etapa_en_el_flujo(orden):
@@ -982,6 +969,8 @@ def eventos_publicos(cambios):
 class ConsultaPublicaSerializer(serializers.ModelSerializer):
     """Publica: solo codigo, estado, etapas y fechas; sin cliente, usuarios, montos, motivos ni ids."""
 
+    fecha_estimada_entrega = FechaEstimadaField()
+
     class Meta:
         model = Orden
         fields = ("codigo", "estado", "fecha_estimada_entrega")
@@ -1011,13 +1000,22 @@ class ConsultaPublicaSerializer(serializers.ModelSerializer):
             if entradas.get(etapa) and (ultima_previa is None or entradas[etapa] > ultima_previa):
                 ultima_previa = entradas[etapa]
         # Pagada depende de lo pagado, no del orden del flujo: si el total sube, vuelve a pendiente.
-        fechas[ETAPA_PAGADA] = momento_de_pago_completo(orden)
+        estado_pago, abonado, total, fechas[ETAPA_PAGADA] = estado_del_pago(orden)
 
         cancelada = orden.estado == Orden.Estado.CANCELADA
         datos.update(
             etapa_actual=etapa_en_el_flujo(orden),
             etapas=[
-                {"etapa": etapa, "fecha": fecha(fechas[etapa]) if fechas[etapa] else None}
+                {
+                    "etapa": etapa,
+                    "fecha": fecha(fechas[etapa]) if fechas[etapa] else None,
+                    # Solo la etapa de pago lleva montos, en pesos enteros; nada de metodos ni ids.
+                    **(
+                        {"estado_pago": estado_pago, "abonado": pesos(abonado), "total": pesos(total)}
+                        if etapa == ETAPA_PAGADA
+                        else {}
+                    ),
+                }
                 for etapa in ETAPAS_SEGUIMIENTO
             ],
             con_novedad=orden.estado == Orden.Estado.CON_NOVEDAD,
