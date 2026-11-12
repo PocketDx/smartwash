@@ -505,7 +505,6 @@ export type Orden = {
   descuento_dano: string;
   valor_total: string;
   abono_requerido: string;
-  duracion_estimada_dias: number;
   fecha_estimada_entrega: string | null;
   fecha_entrega: string | null;
   creado_en: string;
