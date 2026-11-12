@@ -1,4 +1,6 @@
 import base64
+from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 from datetime import date, datetime
 from datetime import timezone as dt_timezone
 from decimal import Decimal
@@ -11,7 +13,7 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import IntegrityError, OperationalError, connection, transaction
 from django.db.migrations.executor import MigrationExecutor
 from django.db.models import ProtectedError
-from django.test import TestCase, TransactionTestCase, override_settings
+from django.test import SimpleTestCase, TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 from rest_framework.test import APITestCase
@@ -20,6 +22,7 @@ from catalogo.models import Material, NivelDificultad, Servicio, Tarifa, TipoPre
 from clientes.models import Cliente
 from fidelizacion.models import ReglaDescuento
 
+from .estimacion import calcular_fecha_estimada, horas_en_proceso, sumar_dias_habiles
 from .historial import OperacionNoCompletada, operacion_sobre_orden, registrar_evento
 from .models import (
     CambioConfiguracionDescuento,
@@ -31,8 +34,6 @@ from .models import (
     Orden,
     OrdenServicio,
     Prenda,
-    duracion_estimada_dias,
-    sumar_dias_habiles,
 )
 
 User = get_user_model()
@@ -424,7 +425,7 @@ class RegistrarOrdenApiTests(CatalogoDePruebaMixin, APITestCase):
         self.crear_catalogo()
         self.client.force_authenticate(self.recepcionista)
 
-    def test_registra_la_orden_en_espera_con_valor_abono_duracion_e_historial(self):
+    def test_registra_la_orden_en_espera_con_valor_abono_e_historial(self):
         response = self.registrar(self.prenda(self.lavado, self.planchado, color="azul"))
 
         self.assertEqual(response.status_code, 201, response.json())
@@ -435,7 +436,6 @@ class RegistrarOrdenApiTests(CatalogoDePruebaMixin, APITestCase):
         # Lavado: 4000 por kilo x 2,5 kg. Planchado: 6000 por prenda.
         self.assertEqual(Decimal(datos["valor_total"]), Decimal("16000"))
         self.assertEqual(Decimal(datos["abono_requerido"]), Decimal("4800"))
-        self.assertEqual(datos["duracion_estimada_dias"], 2)
         self.assertIsNone(datos["fecha_estimada_entrega"])
         self.assertEqual(datos["detalle_prendas"][0]["color"], "azul")
         orden = Orden.objects.get()
@@ -573,14 +573,13 @@ class AgregarLineasApiTests(CatalogoDePruebaMixin, APITestCase):
             format="json",
         )
 
-    def test_agregar_una_prenda_recalcula_total_abono_y_duracion(self):
+    def test_agregar_una_prenda_recalcula_total_y_abono(self):
         response = self.agregar_prenda(self.lavado)
 
         self.assertEqual(response.status_code, 201, response.json())
         self.orden.refresh_from_db()
         self.assertEqual(self.orden.valor_total, Decimal("16000"))
         self.assertEqual(self.orden.abono_requerido, Decimal("4800"))
-        self.assertEqual(self.orden.duracion_estimada_dias, 2)
         self.assertEqual(self.orden.historial.last().tipo_evento, Evento.PRENDA_AGREGADA)
 
     def test_agregar_un_servicio_a_una_prenda_recalcula_y_queda_en_el_historial(self):
@@ -595,7 +594,6 @@ class AgregarLineasApiTests(CatalogoDePruebaMixin, APITestCase):
         self.assertEqual(self.agregar_servicio(self.planchado).status_code, 400)
 
     def test_con_el_abono_ya_alcanzado_no_se_pide_otro_y_se_recalcula_la_fecha(self):
-        # Viernes; la orden queda "Recibida" ese dia.
         Orden.objects.filter(pk=self.orden.pk).update(
             estado=Orden.Estado.RECIBIDA,
             abono_alcanzado_en=date(2026, 10, 9),
@@ -607,8 +605,10 @@ class AgregarLineasApiTests(CatalogoDePruebaMixin, APITestCase):
         self.orden.refresh_from_db()
         self.assertEqual(self.orden.valor_total, Decimal("16000"))
         self.assertEqual(self.orden.abono_requerido, Decimal("1800"))
-        # Dos servicios = 2 dias habiles: sabado y, saltando el domingo, lunes.
-        self.assertEqual(self.orden.fecha_estimada_entrega, date(2026, 10, 12))
+        # Recibida con una prenda: 12 h + 24 h + 12 h = 2 dias habiles desde hoy.
+        self.assertEqual(
+            self.orden.fecha_estimada_entrega, sumar_dias_habiles(timezone.localdate(), 2)
+        )
 
     def test_desde_en_proceso_no_se_agregan_prendas_ni_servicios(self):
         Orden.objects.filter(pk=self.orden.pk).update(estado=Orden.Estado.EN_PROCESO)
@@ -616,22 +616,6 @@ class AgregarLineasApiTests(CatalogoDePruebaMixin, APITestCase):
         self.assertEqual(self.agregar_prenda(self.planchado).status_code, 400)
         self.assertEqual(self.agregar_servicio(self.lavado).status_code, 400)
         self.assertEqual(self.orden.prendas.count(), 1)
-
-
-class DuracionEstimadaTests(TestCase):
-    def test_un_dia_base_mas_medio_dia_por_servicio_adicional_redondeado_hacia_arriba(self):
-        self.assertEqual(
-            [duracion_estimada_dias(n) for n in (1, 2, 3, 4)], [1, 2, 2, 3]
-        )
-
-    @override_settings(ORDEN_DURACION_POR_SERVICIO_ADICIONAL=Decimal("1"))
-    def test_los_valores_son_configurables(self):
-        self.assertEqual(duracion_estimada_dias(3), 3)
-
-    def test_cuenta_de_lunes_a_sabado_sin_domingos(self):
-        sabado = date(2026, 10, 10)
-        self.assertEqual(sumar_dias_habiles(sabado, 1), date(2026, 10, 12))
-        self.assertEqual(sumar_dias_habiles(date(2026, 10, 5), 5), sabado)
 
 
 class AbonoAntesDeAsignarTests(CatalogoDePruebaMixin, APITestCase):
@@ -1484,12 +1468,12 @@ class BandejaOperarioApiTests(CatalogoDePruebaMixin, APITestCase):
 
     def test_las_consultas_no_crecen_con_el_numero_de_ordenes(self):
         self.orden_asignada(self.operario)
-        with self.assertNumQueries(5):
+        with self.assertNumQueries(6):
             self.bandeja()
 
         for _ in range(3):
             self.orden_asignada(self.operario)
-        with self.assertNumQueries(5):
+        with self.assertNumQueries(6):
             self.assertEqual(len(self.bandeja().json()), 4)
 
 
@@ -2301,7 +2285,6 @@ class DecisionNovedadApiTests(OrdenEnProcesoMixin, APITestCase):
         self.assertEqual(self.orden.saldo_pendiente(), self.orden.valor_total)
         self.assertEqual(self.orden.abono_requerido, abono)
         self.assertEqual(self.orden.estado, Orden.Estado.EN_PROCESO)
-        self.assertEqual(self.orden.duracion_estimada_dias, 2)
         self.assertEqual(
             self.orden.fecha_estimada_entrega, sumar_dias_habiles(timezone.localdate(), 2)
         )
@@ -2892,9 +2875,10 @@ class ConsultaPublicaApiTests(CatalogoDePruebaMixin, APITestCase):
 
         self.assertEqual(response.status_code, 200)
         datos = response.json()
+        # Recibida: la fecha la calcula la regla interna, no la guardada en la orden.
         self.assertEqual(
             (datos["codigo"], datos["estado"], datos["fecha_estimada_entrega"]),
-            ("SW-ABCD2345", "Recibida", "2026-11-03"),
+            ("SW-ABCD2345", "Recibida", sumar_dias_habiles(timezone.localdate(), 2).isoformat()),
         )
 
     def test_en_espera_se_muestra_sin_fecha_estimada(self):
@@ -3879,17 +3863,28 @@ class AcumularPuntosTests(CatalogoDePruebaMixin, APITestCase):
 class MigracionValorUnitarioDeclaradoTests(TransactionTestCase):
     antes = [("ordenes", "0013_dano_cantidad_afectada")]
     despues = [("ordenes", "0014_dano_valor_unitario_declarado")]
+    # Al terminar, la base vuelve a la ultima migracion para las pruebas que siguen.
+    ultima = [("ordenes", "0015_quitar_duracion_estimada")]
 
     def test_un_dano_existente_conserva_su_total_y_reparte_el_valor_por_unidad(self):
         executor = MigrationExecutor(connection)
         executor.migrate(self.antes)
-        # Solo DanoPrenda cambia entre 0013 y 0014; lo demas se crea con los modelos actuales.
-        DanoAntes = executor.loader.project_state(self.antes).apps.get_model("ordenes", "DanoPrenda")
-        orden = crear_orden()
-        prenda = Prenda.objects.create(
-            orden=orden, tipo_prenda=TipoPrenda.objects.create(nombre="Pantalon"), cantidad=3
+        # Todo con los modelos de ese momento: la tabla de ordenes tambien era distinta.
+        otras = [nodo for nodo in executor.loader.graph.leaf_nodes() if nodo[0] != "ordenes"]
+        apps = executor.loader.project_state(otras + self.antes).apps
+        recepcion = apps.get_model("accounts", "User").objects.create(username="r", rol="recepcionista")
+        cliente = apps.get_model("clientes", "Cliente").objects.create(
+            documento="1", nombre_completo="Pilar", telefono="3"
         )
-        DanoAntes.objects.create(
+        orden = apps.get_model("ordenes", "Orden").objects.create(
+            codigo="SW-VIEJA001", cliente=cliente, recepcionista=recepcion
+        )
+        prenda = apps.get_model("ordenes", "Prenda").objects.create(
+            orden=orden,
+            tipo_prenda=apps.get_model("catalogo", "TipoPrenda").objects.create(nombre="Pantalon"),
+            cantidad=3,
+        )
+        apps.get_model("ordenes", "DanoPrenda").objects.create(
             orden_id=orden.pk,
             prenda_id=prenda.pk,
             tipo="perdida",
@@ -3907,4 +3902,168 @@ class MigracionValorUnitarioDeclaradoTests(TransactionTestCase):
             (dano.valor_declarado, dano.valor_unitario_declarado, dano.valor_servicio),
             (Decimal("75000"), Decimal("25000"), Decimal("54000")),
         )
+        executor.loader.build_graph()
+        executor.migrate(self.ultima)
+
+
+BOGOTA = ZoneInfo("America/Bogota")
+
+
+def en_bogota(dia, hora, mes=11):
+    return datetime(2026, mes, dia, hora, tzinfo=BOGOTA)
+
+
+class Relacion(list):
+    """Imita lo que la estimacion lee de un related manager."""
+
+    def all(self):
+        return self
+
+    def order_by(self, *campos):
+        return self
+
+    def last(self):
+        return self[-1] if self else None
+
+
+def orden_simulada(estado, prendas=3, cambios=(), novedad_desde=None, cache=None):
+    """`cambios`: (momento, detalle) de los eventos de cambio de estado, en orden."""
+    return SimpleNamespace(
+        estado=estado,
+        fecha_estimada_entrega=cache,
+        creado_en=cambios[0][0] if cambios else en_bogota(1, 8),
+        prendas=Relacion([SimpleNamespace(cantidad=prendas, dano=None)]),
+        historial=Relacion(
+            SimpleNamespace(fecha=momento, tipo_evento=Evento.CAMBIO_ESTADO, detalle=detalle)
+            for momento, detalle in cambios
+        ),
+        novedades=Relacion([SimpleNamespace(estado_anterior=novedad_desde)] if novedad_desde else []),
+    )
+
+
+class EstimacionFechaEntregaTests(SimpleTestCase):
+    """Noviembre de 2026: el lunes 16 es festivo (Independencia de Cartagena)."""
+
+    def estimar(self, estado, desde, ahora=None, prendas=3, **extra):
+        cambios = extra.pop("cambios", [(desde, f"Anterior → {estado}")])
+        orden = orden_simulada(estado, prendas, cambios, **extra)
+        return calcular_fecha_estimada(orden, ahora or desde)
+
+    def test_horas_en_proceso_por_rango_de_prendas(self):
+        esperado = {
+            1: 24, 4: 24, 5: 48, 7: 48, 8: 72, 10: 72, 11: 96, 15: 96, 16: 120, 20: 120,
+            21: 144, 30: 144, 31: 168, 40: 168, 41: 192, 55: 216,
+        }
+        self.assertEqual({n: horas_en_proceso(n) for n in esperado}, esperado)
+
+    def test_48_horas_son_2_dias_y_60_horas_son_3(self):
+        # Clasificada con 3 prendas: 12 + 24 + 12 = 48 h. En proceso con 5: 48 + 12 = 60 h.
+        self.assertEqual(self.estimar("Clasificada", en_bogota(23, 8)), date(2026, 11, 25))
+        self.assertEqual(self.estimar("En proceso", en_bogota(23, 8), prendas=5), date(2026, 11, 26))
+
+    def test_una_orden_de_31_prendas_suma_un_dia_mas_en_proceso(self):
+        # 12 + 168 + 12 = 192 h = 8 dias habiles desde el lunes 23 (sin el domingo 29).
+        self.assertEqual(self.estimar("Clasificada", en_bogota(23, 8), prendas=31), date(2026, 12, 2))
+
+    def test_al_avanzar_de_etapa_se_recalcula_con_lo_que_falta(self):
+        recibida = self.estimar("Recibida", en_bogota(23, 8))
+        en_proceso = self.estimar(
+            "En proceso", en_bogota(24, 9),
+            cambios=[(en_bogota(23, 8), "En espera → Recibida"), (en_bogota(24, 9), "Clasificada → En proceso")],
+        )
+
+        self.assertEqual(recibida, date(2026, 11, 25))
+        self.assertEqual(en_proceso, date(2026, 11, 26))
+
+    def test_la_etapa_atrasada_se_recalcula_desde_ahora_con_margen_y_nunca_queda_en_el_pasado(self):
+        # En proceso desde el lunes 23 (24 h): el jueves 26 ya va atrasada: 12 h de margen + 12 h.
+        atrasada = self.estimar("En proceso", en_bogota(23, 8), ahora=en_bogota(26, 10))
+        mucho_despues = self.estimar("En proceso", en_bogota(2, 8), ahora=en_bogota(26, 10))
+
+        self.assertEqual(atrasada, date(2026, 11, 27))
+        self.assertEqual(mucho_despues, date(2026, 11, 27))
+
+    def test_el_reproceso_por_una_novedad_cuenta_en_proceso_de_nuevo(self):
+        fecha = self.estimar(
+            "En proceso", None, ahora=en_bogota(25, 10),
+            cambios=[
+                (en_bogota(23, 8), "Clasificada → En proceso"),
+                (en_bogota(23, 14), "En proceso → Con novedad"),
+                (en_bogota(25, 9), "Agregar servicio: Ana pide lavarla. Con novedad → En proceso"),
+            ],
+        )
+
+        self.assertEqual(fecha, date(2026, 11, 27))
+
+    def test_con_novedad_se_estima_desde_la_etapa_en_que_estaba(self):
+        fecha = self.estimar(
+            "Con novedad", None, ahora=en_bogota(24, 10), novedad_desde="Control de calidad",
+            cambios=[(en_bogota(24, 8), "En proceso → Control de calidad"),
+                     (en_bogota(24, 9), "Control de calidad → Con novedad")],
+        )
+
+        self.assertEqual(fecha, date(2026, 11, 25))
+
+    def test_lista_y_entregada_conservan_la_ultima_estimacion_y_las_demas_no_tienen(self):
+        for estado, esperado in (
+            ("Lista para entrega", date(2026, 11, 20)),
+            ("Entregada", date(2026, 11, 20)),
+            ("Cancelada", None),
+            ("En espera", None),
+        ):
+            with self.subTest(estado=estado):
+                orden = orden_simulada(estado, cache=date(2026, 11, 20))
+                self.assertEqual(calcular_fecha_estimada(orden, en_bogota(30, 8)), esperado)
+
+    def test_recibida_un_sabado_se_entrega_el_martes_o_el_miercoles_si_el_lunes_es_festivo(self):
+        self.assertEqual(self.estimar("Recibida", en_bogota(21, 8)), date(2026, 11, 24))
+        self.assertEqual(self.estimar("Recibida", en_bogota(14, 8)), date(2026, 11, 18))
+
+    def test_dias_habiles_de_lunes_a_sabado_sin_domingos_ni_festivos(self):
+        casos = [
+            ("sabado mas 1 es lunes", date(2026, 11, 21), 1, date(2026, 11, 23)),
+            ("sabado con lunes festivo", date(2026, 11, 14), 1, date(2026, 11, 17)),
+            ("domingo es el siguiente habil", date(2026, 11, 22), 0, date(2026, 11, 23)),
+            ("domingo antes de festivo", date(2026, 11, 15), 0, date(2026, 11, 17)),
+            ("puente festivo en medio", date(2026, 11, 13), 2, date(2026, 11, 17)),
+            ("un dia habil con 0 es el mismo", date(2026, 11, 20), 0, date(2026, 11, 20)),
+            ("Semana Santa", date(2026, 4, 1), 1, date(2026, 4, 4)),
+        ]
+        for nombre, desde, dias, esperado in casos:
+            with self.subTest(nombre):
+                self.assertEqual(sumar_dias_habiles(desde, dias), esperado)
+
+    def test_un_recalculo_el_viernes_puede_caer_en_sabado(self):
+        fecha = self.estimar("En proceso", en_bogota(18, 8), ahora=en_bogota(20, 10))
+
+        self.assertEqual(fecha, date(2026, 11, 21))
+
+    def test_un_recalculo_que_caeria_en_domingo_pasa_al_lunes(self):
+        fecha = self.estimar("En proceso", en_bogota(18, 8), ahora=en_bogota(21, 10))
+
+        self.assertEqual(fecha, date(2026, 11, 23))
+
+
+class FechaEstimadaEnLaApiTests(CatalogoDePruebaMixin, APITestCase):
+    def test_ningun_endpoint_muestra_horas_duraciones_ni_margenes(self):
+        self.crear_catalogo()
+        operario = User.objects.create_user(username="op", password="x", rol=User.Rol.OPERARIO)
+        self.client.force_authenticate(self.recepcionista)
+        orden = self.registrar(self.prenda(self.planchado)).json()
+        url = f"/api/ordenes/{orden['id']}"
+        self.client.post(f"{url}/pagos", {"monto": "6000", "metodo": "efectivo"}, format="json")
+        self.client.post(f"{url}/asignacion", {"operario": operario.pk}, format="json")
+
+        respuestas = [self.client.get(url).json(), self.client.get("/api/ordenes").json()]
+        self.client.force_authenticate(operario)
+        respuestas.append(self.client.get("/api/ordenes/bandeja").json())
+        self.client.force_authenticate(None)
+        respuestas.append(self.client.get(f"/api/ordenes/consulta/{orden['codigo']}").json())
+
+        hoy = timezone.localdate()
+        self.assertEqual(respuestas[0]["fecha_estimada_entrega"], sumar_dias_habiles(hoy, 2).isoformat())
+        for respuesta in respuestas:
+            texto = str(respuesta).lower()
+            for interno in ("duracion", "horas", "margen"):
+                self.assertNotIn(interno, texto)
 

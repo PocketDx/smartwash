@@ -82,6 +82,7 @@ def ordenes_con_detalle():
         "prendas__material",
         "prendas__servicios__tarifa__servicio",
         "prendas__dano",
+        "historial",
     )
 
 
@@ -157,12 +158,12 @@ class BandejaOperarioView(generics.ListAPIView):
     def get_queryset(self):
         # Una prenda danada o perdida ya no se procesa aunque la orden vuelva a proceso.
         por_procesar = Prenda.objects.filter(dano__isnull=True).select_related(
-            "tipo_prenda", "material"
+            "tipo_prenda", "material", "dano"
         ).prefetch_related("servicios__tarifa__servicio")
         return (
             Orden.objects.filter(operario=self.request.user)
             .exclude(estado__in=self.ESTADOS_FUERA_DE_BANDEJA)
-            .prefetch_related(Prefetch("prendas", por_procesar))
+            .prefetch_related(Prefetch("prendas", por_procesar), "historial")
             .order_by("fecha_estimada_entrega", "creado_en")
         )
 
