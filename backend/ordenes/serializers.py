@@ -24,6 +24,7 @@ from .models import (
     Orden,
     OrdenServicio,
     Prenda,
+    sumar_dias_habiles,
 )
 
 Evento = HistorialOrden.TipoEvento
@@ -441,17 +442,44 @@ def registrar_novedades(orden, novedades, origen, usuario):
     )
 
 
+# Reprocesar y no continuar ya no se ofrecen en el proceso; quedan en los choices
+# por las decisiones que se registraron antes.
 DECISIONES_POR_ORIGEN = {
     Novedad.Origen.PROCESO: (
         Novedad.Decision.CONTINUAR,
-        Novedad.Decision.REPROCESAR,
-        Novedad.Decision.NO_CONTINUAR,
+        Novedad.Decision.AGREGAR_SERVICIO,
     ),
     Novedad.Origen.ENTREGA: (
         Novedad.Decision.ENTREGAR_CON_DESCUENTO,
         Novedad.Decision.REPROCESAR_CON_DESCUENTO,
     ),
 }
+
+
+def agregar_servicios_por_novedad(novedades, servicios, usuario):
+    """Agrega a las prendas con novedad los servicios que pidio el cliente.
+
+    Devuelve la nota para el historial. El total y la fecha los recalcula quien llama.
+    """
+    prendas = {n.prenda_id: n.prenda for n in novedades}
+    if not servicios:
+        raise serializers.ValidationError({"servicios": "Elige al menos un servicio para agregar."})
+    notas = []
+    for item in servicios:
+        prenda = prendas.get(item["prenda"])
+        if prenda is None:
+            raise serializers.ValidationError(
+                {"servicios": "Solo se agregan servicios a la prenda con novedad."}
+            )
+        servicio = item["servicio"]
+        if prenda.servicios.filter(tarifa__servicio=servicio).exists():
+            raise serializers.ValidationError(
+                {"servicios": f'La prenda "{prenda}" ya tiene "{servicio}".'}
+            )
+        exigir_peso_registrado(prenda)
+        linea = agregar_servicio(prenda, tarifa_aplicable(prenda.tipo_prenda, servicio), usuario)
+        notas.append(f"{linea} (${linea.valor_aplicado})")
+    return "; ".join(notas)
 
 
 def aplicar_descuento(novedad, porcentaje, configuracion, gravedad=""):
@@ -505,12 +533,19 @@ def registrar_decision(orden, datos, usuario):
     configuracion = ConfiguracionDescuentoNovedad.actual()
     descuentos = []
     reasignacion = None
+    servicios_agregados = ""
     if decision == Novedad.Decision.CONTINUAR:
         orden.estado = novedades[0].estado_anterior
-    elif decision == Novedad.Decision.REPROCESAR:
-        # Sin costo para el cliente: solo se cuenta, como el reproceso de HU14.
+    elif decision == Novedad.Decision.AGREGAR_SERVICIO:
+        servicios_agregados = agregar_servicios_por_novedad(
+            novedades, datos.get("servicios", []), usuario
+        )
+        # El abono ya se exigio: lo nuevo se suma al saldo y el trabajo extra corre desde hoy.
+        orden.recalcular()
+        orden.fecha_estimada_entrega = sumar_dias_habiles(
+            timezone.localdate(), orden.duracion_estimada_dias
+        )
         orden.estado = Orden.Estado.EN_PROCESO
-        orden.numero_reprocesos += 1
     elif decision == Novedad.Decision.ENTREGAR_CON_DESCUENTO:
         gravedades = {g["novedad"]: g["gravedad"] for g in datos.get("gravedades", [])}
         if sorted(gravedades) != sorted(n.pk for n in novedades):
@@ -549,6 +584,11 @@ def registrar_decision(orden, datos, usuario):
     detalle = f"{Novedad.Decision(decision).label}: {observacion}. "
     if descuentos:
         detalle += f"Descuentos: {'; '.join(descuentos)}. Nuevo total ${orden.valor_total}. "
+    if servicios_agregados:
+        detalle += (
+            f"Servicios agregados: {servicios_agregados}. Nuevo total ${orden.valor_total}, "
+            f"nueva fecha estimada {orden.fecha_estimada_entrega:%d/%m/%Y}. "
+        )
     if orden.estado != Orden.Estado.CON_NOVEDAD:
         detalle += f"{Orden.Estado.CON_NOVEDAD} → {orden.estado}"
     elif decision != Novedad.Decision.ENTREGAR_CON_DESCUENTO:
@@ -563,6 +603,11 @@ class GravedadNovedadSerializer(serializers.Serializer):
     gravedad = serializers.ChoiceField(choices=Novedad.Gravedad.choices)
 
 
+class ServicioPorNovedadSerializer(serializers.Serializer):
+    prenda = serializers.IntegerField()
+    servicio = serializers.PrimaryKeyRelatedField(queryset=Servicio.objects.all())
+
+
 class DecisionNovedadSerializer(serializers.Serializer):
     decision = serializers.ChoiceField(choices=Novedad.Decision.choices)
     observacion = serializers.CharField(
@@ -572,6 +617,7 @@ class DecisionNovedadSerializer(serializers.Serializer):
         }
     )
     gravedades = GravedadNovedadSerializer(many=True, required=False)
+    servicios = ServicioPorNovedadSerializer(many=True, required=False)
     operario = serializers.PrimaryKeyRelatedField(
         queryset=operarios_activos(),
         required=False,

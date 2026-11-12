@@ -498,6 +498,7 @@ class Novedad(ModeloConAutoria):
         NO_CONTINUAR = "no_continuar", "No continuar"
         ENTREGAR_CON_DESCUENTO = "entregar_con_descuento", "Entregar con descuento"
         REPROCESAR_CON_DESCUENTO = "reprocesar_con_descuento", "Reprocesar con descuento"
+        AGREGAR_SERVICIO = "agregar_servicio", "Agregar servicio"
 
     class Gravedad(models.TextChoices):
         LEVE = "leve", "Leve"

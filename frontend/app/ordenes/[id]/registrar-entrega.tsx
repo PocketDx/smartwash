@@ -165,7 +165,12 @@ export default function RegistrarEntrega({ orden }: { orden: Orden }) {
                       name={nombre}
                       checked={resultado === opcion.valor}
                       onChange={() =>
-                        revisar(prenda.id, opcion.valor === "coincide" ? vacia() : { resultado: opcion.valor })
+                        revisar(
+                          prenda.id,
+                          opcion.valor === "coincide"
+                            ? { ...vacia(), resultado: "coincide" }
+                            : { resultado: opcion.valor },
+                        )
                       }
                       required={i === 0}
                     />
@@ -203,7 +208,7 @@ export default function RegistrarEntrega({ orden }: { orden: Orden }) {
                   <ClayInput
                     type="number"
                     min="1"
-                    step="100"
+                    step="1"
                     inputMode="numeric"
                     value={revision.valor}
                     onChange={(e) => revisar(prenda.id, { valor: e.target.value })}

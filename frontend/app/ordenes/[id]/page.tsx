@@ -154,7 +154,7 @@ export default async function OrdenPage({
         <DecisionEntrega orden={orden} novedades={novedades} operarios={operarios} configuracion={configuracion} />
       )}
       {puedeEditar && orden.estado === "Con novedad" && novedades && (
-        <DecisionProceso ordenId={orden.id} novedades={novedades} />
+        <DecisionProceso orden={orden} novedades={novedades} servicios={servicios} tarifas={tarifasVigentes} />
       )}
       <RegistrarNovedad orden={orden} usuario={user} />
       {novedades && <NovedadesOrden novedades={novedades} />}

@@ -2,9 +2,10 @@ import { cookies } from "next/headers";
 import Link from "next/link";
 import { redirect } from "next/navigation";
 
-import { getCurrentUser, getOrdenesConNovedad } from "@/lib/api";
+import { getCurrentUser, getOrden, getOrdenesConNovedad, getServicios, getTarifas } from "@/lib/api";
 import { ClayCard, Encabezado, clayBtnClass } from "../../components/ui/clay";
 import DecisionProceso from "../[id]/decision-proceso";
+import { tarifasDeHoy } from "../cotizacion";
 import NovedadesOrden from "../[id]/novedades-orden";
 
 export default async function OrdenesConNovedadPage() {
@@ -13,7 +14,14 @@ export default async function OrdenesConNovedadPage() {
   if (!user) redirect("/login");
   if (user.rol === "operario") redirect("/");
 
-  const ordenes = await getOrdenesConNovedad(cookieStore);
+  const [ordenes, servicios, tarifas] = await Promise.all([
+    getOrdenesConNovedad(cookieStore),
+    getServicios(cookieStore),
+    getTarifas(cookieStore, true),
+  ]);
+  // Para agregar servicios hacen falta las prendas con sus servicios actuales.
+  const detalles = await Promise.all((ordenes ?? []).map((o) => getOrden(o.id, cookieStore)));
+  const tarifasVigentes = tarifas ? tarifasDeHoy(tarifas) : null;
 
   return (
     <main className="mx-auto max-w-4xl px-4 py-8 sm:px-8 sm:py-12">
@@ -33,7 +41,7 @@ export default async function OrdenesConNovedadPage() {
           <p className="text-sm text-(--sw-ink-soft)">No hay ordenes con novedad pendiente.</p>
         </ClayCard>
       ) : (
-        ordenes.map((orden) => (
+        ordenes.map((orden, i) => (
           <section key={orden.id} className="mb-8">
             <NovedadesOrden
               novedades={orden.novedades}
@@ -61,7 +69,14 @@ export default async function OrdenesConNovedadPage() {
                 </div>
               )}
             </NovedadesOrden>
-            <DecisionProceso ordenId={orden.id} novedades={orden.novedades} />
+            {detalles[i] && (
+              <DecisionProceso
+                orden={detalles[i]}
+                novedades={orden.novedades}
+                servicios={servicios}
+                tarifas={tarifasVigentes}
+              />
+            )}
           </section>
         ))
       )}
