@@ -41,9 +41,11 @@ function Detalle({ orden }: { orden: SeguimientoOrden }) {
   return (
     <>
       <Aviso orden={orden} />
-      <div className="mt-5">
-        <LineaTiempo orden={orden} />
-      </div>
+      {orden.etapas.length > 0 && (
+        <div className="mt-5">
+          <LineaTiempo orden={orden} />
+        </div>
+      )}
       {pendienteDeEntrega && orden.fecha_estimada_entrega && (
         <p className="mt-5 text-sm text-(--sw-ink-soft)">
           Entrega estimada: <strong className="text-(--sw-ink)">{fechaLarga(orden.fecha_estimada_entrega)}</strong>
@@ -82,7 +84,18 @@ export default function RastreoForm() {
     setPending(false);
 
     if (response?.ok) {
-      setResultado((await response.json()) as SeguimientoOrden);
+      // Un backend anterior a la linea de tiempo no manda etapas ni eventos: se muestra sin ella.
+      const datos = (await response.json()) as Partial<SeguimientoOrden> & Pick<SeguimientoOrden, "codigo" | "estado">;
+      setResultado({
+        fecha_estimada_entrega: null,
+        etapa_actual: null,
+        con_novedad: false,
+        cancelada: datos.estado === "Cancelada",
+        fecha_cancelacion: null,
+        ...datos,
+        etapas: datos.etapas ?? [],
+        eventos: datos.eventos ?? [],
+      });
     } else if (response?.status === 404) {
       const { detail } = await leerErroresApi(response);
       setFallo({
