@@ -601,7 +601,7 @@ class PagoDanoView(APIView):
                 Evento.PAGO_DANO,
                 request.user,
                 f"${dano.valor_declarado} pagados al cliente por {dano.get_tipo_display().lower()} "
-                f"de {dano.prenda}. {dano.observacion_pago}",
+                f"de {dano.cantidad_afectada} de {dano.prenda}. {dano.observacion_pago}",
             )
         return Response(DanoPrendaSerializer(dano).data)
 

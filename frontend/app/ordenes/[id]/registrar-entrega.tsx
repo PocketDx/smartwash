@@ -4,7 +4,7 @@ import { useRouter } from "next/navigation";
 import { useState, type FormEvent } from "react";
 
 import { AlertaErrores } from "@/app/catalogo/errores";
-import { registrarEntrega, type Orden, type ResultadoVerificacion } from "@/lib/api";
+import { registrarEntrega, type Orden, type PrendaDeOrden, type ResultadoVerificacion } from "@/lib/api";
 import { formatCOP } from "@/lib/format";
 import { ClayButton, ClayCard, ClayInput, ClayTextarea } from "../../components/ui/clay";
 import CampoFoto from "../campo-foto";
@@ -17,7 +17,10 @@ type Revision = {
   resultado: ResultadoVerificacion | null;
   observacion: string;
   foto: FotoLista | null;
+  // Valor de UNA unidad; el backend calcula el total que se le debe al cliente.
   valor: string;
+  // Vacio significa la linea completa; solo se pregunta si la linea tiene mas de una unidad.
+  unidades: string;
 };
 
 const OPCIONES: { valor: ResultadoVerificacion; etiqueta: string }[] = [
@@ -30,15 +33,40 @@ const OPCIONES: { valor: ResultadoVerificacion; etiqueta: string }[] = [
 const PIDE_FOTO: ResultadoVerificacion[] = ["novedad", "dano"];
 const PIDE_VALOR: ResultadoVerificacion[] = ["dano", "perdida"];
 
-const vacia = (): Revision => ({ resultado: null, observacion: "", foto: null, valor: "" });
+const vacia = (): Revision => ({ resultado: null, observacion: "", foto: null, valor: "", unidades: "" });
 
-function estaCompleta(r: Revision) {
+function unidadesAfectadas(prenda: PrendaDeOrden, r: Revision) {
+  return r.unidades === "" ? prenda.cantidad : Number(r.unidades);
+}
+
+function estaCompleta(prenda: PrendaDeOrden, r: Revision) {
   if (r.resultado === null) return false;
   if (r.resultado === "coincide") return true;
+  const unidades = unidadesAfectadas(prenda, r);
   return (
     r.observacion.trim() !== "" &&
     (!PIDE_FOTO.includes(r.resultado) || r.foto !== null) &&
-    (!PIDE_VALOR.includes(r.resultado) || Number(r.valor) > 0)
+    (!PIDE_VALOR.includes(r.resultado) ||
+      (Number(r.valor) > 0 && Number.isInteger(unidades) && unidades >= 1 && unidades <= prenda.cantidad))
+  );
+}
+
+// Solo informativo: el total que vale es el que calcula el backend.
+function ResumenDano({ prenda, revision }: { prenda: PrendaDeOrden; revision: Revision }) {
+  const unidades = unidadesAfectadas(prenda, revision);
+  const valor = Number(revision.valor);
+  const sinCobrar = formatCOP((valorDePrenda(prenda) * unidades) / prenda.cantidad);
+  return (
+    <span className="text-xs text-(--sw-ink-soft)">
+      {valor > 0 && Number.isInteger(unidades) ? (
+        <>
+          Se le debe al cliente: <strong>{formatCOP(valor * unidades)}</strong> ({unidades} × {formatCOP(valor)}).
+          No se cobran {sinCobrar} del servicio.
+        </>
+      ) : (
+        `No se cobran ${sinCobrar} del servicio.`
+      )}
+    </span>
   );
 }
 
@@ -52,11 +80,11 @@ export default function RegistrarEntrega({ orden }: { orden: Orden }) {
   const [errores, setErrores] = useState<string[]>([]);
   const [pending, setPending] = useState(false);
 
-  const completa = prendas.every((p) => estaCompleta(revisiones[p.id]));
+  const completa = prendas.every((p) => estaCompleta(p, revisiones[p.id]));
   const hayNovedades = prendas.some((p) => revisiones[p.id].resultado === "novedad");
   const sinCobrar = prendas
     .filter((p) => PIDE_VALOR.includes(revisiones[p.id].resultado ?? "coincide"))
-    .reduce((suma, p) => suma + valorDePrenda(p), 0);
+    .reduce((suma, p) => suma + (valorDePrenda(p) * unidadesAfectadas(p, revisiones[p.id])) / p.cantidad, 0);
 
   function revisar(prenda: number, cambios: Partial<Revision>) {
     setRevisiones((actual) => ({ ...actual, [prenda]: { ...actual[prenda], ...cambios } }));
@@ -84,7 +112,8 @@ export default function RegistrarEntrega({ orden }: { orden: Orden }) {
         resultado,
         observacion: resultado === "coincide" ? "" : r.observacion.trim(),
         foto: PIDE_FOTO.includes(resultado) ? (r.foto?.dataUrl ?? null) : null,
-        valor_declarado: PIDE_VALOR.includes(resultado) ? r.valor : null,
+        valor_unitario_declarado: PIDE_VALOR.includes(resultado) ? r.valor : null,
+        cantidad_afectada: PIDE_VALOR.includes(resultado) ? unidadesAfectadas(p, r) : null,
       };
     });
     const response = await registrarEntrega(orden.id, verificaciones).catch(() => null);
@@ -200,10 +229,30 @@ export default function RegistrarEntrega({ orden }: { orden: Orden }) {
                   obligatoria
                 />
               )}
+              {resultado !== null && PIDE_VALOR.includes(resultado) && prenda.cantidad > 1 && (
+                <label className="flex flex-col gap-1 text-sm">
+                  <span className="font-medium text-(--sw-ink-soft)">
+                    Unidades {resultado === "perdida" ? "perdidas" : "dañadas"} (de {prenda.cantidad})
+                  </span>
+                  <ClayInput
+                    type="number"
+                    min="1"
+                    max={prenda.cantidad}
+                    step="1"
+                    inputMode="numeric"
+                    value={revision.unidades === "" ? String(prenda.cantidad) : revision.unidades}
+                    onChange={(e) => revisar(prenda.id, { unidades: e.target.value })}
+                    required
+                  />
+                  <span className="text-xs text-(--sw-ink-soft)">
+                    Las demas unidades de esta linea se entregan y se cobran normal.
+                  </span>
+                </label>
+              )}
               {resultado !== null && PIDE_VALOR.includes(resultado) && (
                 <label className="flex flex-col gap-1 text-sm">
                   <span className="font-medium text-(--sw-ink-soft)">
-                    Valor de la prenda que declara el cliente (obligatorio)
+                    Valor de una unidad que declara el cliente (obligatorio)
                   </span>
                   <ClayInput
                     type="number"
@@ -214,10 +263,7 @@ export default function RegistrarEntrega({ orden }: { orden: Orden }) {
                     onChange={(e) => revisar(prenda.id, { valor: e.target.value })}
                     required
                   />
-                  <span className="text-xs text-(--sw-ink-soft)">
-                    La lavanderia le debe este valor al cliente. Ademas, no se cobra el servicio de esta
-                    prenda ({formatCOP(valorDePrenda(prenda))}).
-                  </span>
+                  <ResumenDano prenda={prenda} revision={revision} />
                 </label>
               )}
             </fieldset>
