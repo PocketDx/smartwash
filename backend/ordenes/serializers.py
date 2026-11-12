@@ -16,6 +16,7 @@ from clientes.models import Cliente
 from .estimacion import calcular_fecha_estimada, transiciones
 from .historial import operacion_sobre_orden, registrar_evento
 from .models import (
+    Comprobante,
     ConfiguracionDescuentoNovedad,
     DanoPrenda,
     FotoDano,
@@ -1031,6 +1032,15 @@ class ConsultaPublicaSerializer(serializers.ModelSerializer):
             ],
         )
         return datos
+
+
+class ComprobanteSerializer(serializers.ModelSerializer):
+    tipo_nombre = serializers.CharField(source="get_tipo_display", read_only=True)
+
+    class Meta:
+        model = Comprobante
+        fields = ("tipo", "tipo_nombre", "generado_en", "contenido")
+        read_only_fields = fields
 
 
 class OrdenHistorialClienteSerializer(serializers.ModelSerializer):
