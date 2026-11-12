@@ -902,15 +902,30 @@ ETAPAS_FLUJO = (
 )
 ETAPA_PAGADA = "Pagada"
 ETAPAS_SEGUIMIENTO = (*ETAPAS_FLUJO, ETAPA_PAGADA, Orden.Estado.ENTREGADA)
-def momento_de_pago_completo(orden):
-    if orden.valor_total <= 0 or orden.total_pagado() < orden.valor_total:
-        return None
+def estado_del_pago(orden):
+    """(estado, abonado, total, momento) segun los pagos registrados.
+
+    El total es valor_total, lo que realmente se cobra: ya descuenta fidelizacion,
+    novedades y servicios de prendas danadas o perdidas, e incluye los servicios agregados.
+    El momento es el del ultimo abono si es parcial, o el del pago que completo el total.
+    """
+    pagos = list(orden.pagos.all())
+    abonado = sum((pago.monto for pago in pagos), Decimal("0"))
+    total = orden.valor_total
+    if not pagos:
+        return "pendiente", abonado, total, None
+    if abonado < total:
+        return "parcial", abonado, total, pagos[-1].creado_en
     acumulado = Decimal("0")
-    for pago in orden.pagos.all():
+    for pago in pagos:
         acumulado += pago.monto
-        if acumulado >= orden.valor_total:
-            return pago.creado_en
-    return None
+        if acumulado >= total:
+            return "completo", abonado, total, pago.creado_en
+    return "completo", abonado, total, pagos[-1].creado_en
+
+
+def pesos(valor):
+    return int(valor.to_integral_value())
 
 
 def etapa_en_el_flujo(orden):
@@ -985,13 +1000,22 @@ class ConsultaPublicaSerializer(serializers.ModelSerializer):
             if entradas.get(etapa) and (ultima_previa is None or entradas[etapa] > ultima_previa):
                 ultima_previa = entradas[etapa]
         # Pagada depende de lo pagado, no del orden del flujo: si el total sube, vuelve a pendiente.
-        fechas[ETAPA_PAGADA] = momento_de_pago_completo(orden)
+        estado_pago, abonado, total, fechas[ETAPA_PAGADA] = estado_del_pago(orden)
 
         cancelada = orden.estado == Orden.Estado.CANCELADA
         datos.update(
             etapa_actual=etapa_en_el_flujo(orden),
             etapas=[
-                {"etapa": etapa, "fecha": fecha(fechas[etapa]) if fechas[etapa] else None}
+                {
+                    "etapa": etapa,
+                    "fecha": fecha(fechas[etapa]) if fechas[etapa] else None,
+                    # Solo la etapa de pago lleva montos, en pesos enteros; nada de metodos ni ids.
+                    **(
+                        {"estado_pago": estado_pago, "abonado": pesos(abonado), "total": pesos(total)}
+                        if etapa == ETAPA_PAGADA
+                        else {}
+                    ),
+                }
                 for etapa in ETAPAS_SEGUIMIENTO
             ],
             con_novedad=orden.estado == Orden.Estado.CON_NOVEDAD,

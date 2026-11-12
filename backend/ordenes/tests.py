@@ -2917,10 +2917,14 @@ class ConsultaPublicaApiTests(CatalogoDePruebaMixin, APITestCase):
                 "eventos",
             },
         )
-        self.assertEqual({tuple(e) for e in datos["etapas"]}, {("etapa", "fecha")})
+        pago = next(e for e in datos["etapas"] if e["etapa"] == "Pagada")
+        self.assertEqual(set(pago), {"etapa", "fecha", "estado_pago", "abonado", "total"})
+        otras = [e for e in datos["etapas"] if e["etapa"] != "Pagada"]
+        self.assertEqual({tuple(e) for e in otras}, {("etapa", "fecha")})
+        sin_pago = {**datos, "etapas": otras}
         self.assertNotIn("Ana Gomez", str(datos))
-        self.assertNotIn("16000", str(datos))
-        self.assertNotIn(str(self.orden.pk), str(datos).replace("SW-ABCD2345", ""))
+        self.assertNotIn("16000", str(sin_pago))
+        self.assertNotIn(str(self.orden.pk), str(sin_pago).replace("SW-ABCD2345", ""))
 
     # Orden recorrida por la API, con la hora de cada paso fija.
     def en(self, momento, metodo, url, datos):
@@ -3010,7 +3014,7 @@ class ConsultaPublicaApiTests(CatalogoDePruebaMixin, APITestCase):
                 "En proceso": "2026-11-10T12:00:00-05:00",
                 "Control de calidad": "2026-11-11T09:00:00-05:00",
                 "Lista para entrega": None,
-                "Pagada": None,
+                "Pagada": "2026-11-10T09:00:00-05:00",
                 "Entregada": None,
             },
         )
@@ -3026,11 +3030,84 @@ class ConsultaPublicaApiTests(CatalogoDePruebaMixin, APITestCase):
         self.assertEqual(fechas["Pagada"], "2026-11-11T16:00:00-05:00")
         self.assertEqual(fechas["Entregada"], "2026-11-12T17:00:00-05:00")
 
-    def test_pagada_queda_pendiente_mientras_falte_saldo(self):
-        fechas = self.fechas(self.recorrer("abono", "clasificar", "asignar", "procesar", "calidad", "lista"))
+    def pago(self, datos):
+        return next(e for e in datos["etapas"] if e["etapa"] == "Pagada")
 
-        self.assertIsNone(fechas["Pagada"])
-        self.assertEqual(fechas["Lista para entrega"], "2026-11-11T15:00:00-05:00")
+    def test_sin_pagos_la_etapa_de_pago_queda_pendiente(self):
+        pago = self.pago(self.recorrer())
+
+        self.assertEqual(
+            (pago["estado_pago"], pago["fecha"], pago["abonado"], pago["total"]), ("pendiente", None, 0, 6000)
+        )
+
+    def test_un_abono_deja_el_pago_parcial_con_la_fecha_del_abono(self):
+        datos = self.recorrer("abono", "clasificar", "asignar", "procesar", "calidad", "lista")
+
+        self.assertEqual(
+            self.pago(datos),
+            {"etapa": "Pagada", "fecha": "2026-11-10T09:00:00-05:00", "estado_pago": "parcial",
+             "abonado": 1800, "total": 6000},
+        )
+        self.assertEqual(self.fechas(datos)["Lista para entrega"], "2026-11-11T15:00:00-05:00")
+
+    def test_varios_abonos_que_no_alcanzan_siguen_parciales_con_la_fecha_del_ultimo(self):
+        self.recorrer("abono")
+        self.client.force_authenticate(User.objects.get(username="admin"))
+        self.en(hora(10, 14), "post", self.url + "/pagos", {"monto": "1000", "metodo": "transferencia"})
+        self.client.force_authenticate(None)
+
+        pago = self.pago(self.consultar(self.codigo).json())
+
+        self.assertEqual(
+            (pago["estado_pago"], pago["abonado"], pago["fecha"]), ("parcial", 2800, "2026-11-10T14:00:00-05:00")
+        )
+
+    def test_un_pago_unico_completo(self):
+        self.recorrer()
+        self.client.force_authenticate(User.objects.get(username="admin"))
+        self.en(hora(10, 9), "post", self.url + "/pagos", {"monto": "6000", "metodo": "efectivo"})
+        self.client.force_authenticate(None)
+
+        pago = self.pago(self.consultar(self.codigo).json())
+
+        self.assertEqual(
+            (pago["estado_pago"], pago["abonado"], pago["total"], pago["fecha"]),
+            ("completo", 6000, 6000, "2026-11-10T09:00:00-05:00"),
+        )
+
+    def test_los_abonos_que_completan_el_total_toman_la_fecha_del_que_lo_completo(self):
+        pago = self.pago(self.recorrer("abono", "clasificar", "asignar", "procesar", "calidad", "lista", "saldo"))
+
+        self.assertEqual(
+            (pago["estado_pago"], pago["abonado"], pago["fecha"]), ("completo", 6000, "2026-11-11T16:00:00-05:00")
+        )
+
+    def test_el_total_es_lo_que_realmente_se_cobra_con_descuentos(self):
+        ReglaDescuento.objects.create(
+            nombre="10%", tipo="porcentaje", valor=Decimal("10"), vigente_desde=date(2020, 1, 1)
+        )
+        self.recorrer("abono")
+        self.client.force_authenticate(User.objects.get(username="admin"))
+        self.en(hora(10, 15), "post", self.url + "/pagos", {"monto": "3600", "metodo": "tarjeta"})
+        self.client.force_authenticate(None)
+
+        pago = self.pago(self.consultar(self.codigo).json())
+
+        self.assertEqual(
+            (pago["estado_pago"], pago["abonado"], pago["total"], pago["fecha"]),
+            ("completo", 5400, 5400, "2026-11-10T15:00:00-05:00"),
+        )
+
+    def test_la_etapa_de_pago_no_trae_metodos_ni_datos_internos(self):
+        self.recorrer("abono")
+        self.client.force_authenticate(User.objects.get(username="admin"))
+        self.en(hora(10, 14), "post", self.url + "/pagos", {"monto": "1000", "metodo": "transferencia"})
+        self.client.force_authenticate(None)
+        texto = str(self.consultar(self.codigo).json()).lower()
+
+        for interno in ("metodo", "efectivo", "transferencia", "usuario", "admin", "referencia", "nota", "'id'"):
+            with self.subTest(interno=interno):
+                self.assertNotIn(interno, texto)
 
     def test_con_reproceso_se_muestra_la_ultima_entrada_y_lo_posterior_vuelve_a_pendiente(self):
         datos = self.recorrer("abono", "clasificar", "asignar", "procesar", "calidad", "reprocesar")
@@ -3100,7 +3177,8 @@ class ConsultaPublicaApiTests(CatalogoDePruebaMixin, APITestCase):
         self.assertEqual(datos["etapa_actual"], "En proceso")
         self.assertEqual(fechas["En proceso"], "2026-11-11T11:00:00-05:00")
         self.assertIsNone(fechas["Control de calidad"])
-        self.assertIsNone(fechas["Pagada"])
+        # El servicio agregado sube el total: lo abonado queda como pago parcial.
+        self.assertEqual(self.pago(datos)["estado_pago"], "parcial")
         self.assertEqual(self.etiquetas(datos)[-2:], ["Novedad en una prenda", "Volvio a proceso"])
 
     def test_la_orden_cancelada_marca_la_cancelacion_y_conserva_lo_cumplido(self):
@@ -3131,9 +3209,12 @@ class ConsultaPublicaApiTests(CatalogoDePruebaMixin, APITestCase):
         datos = self.recorrer("abono", "clasificar", "asignar", "procesar")
         texto = str(datos)
 
+        # Los montos solo van en la etapa de pago (estado_pago, abonado, total).
+        sin_pago = str({**datos, "etapas": [e for e in datos["etapas"] if e["etapa"] != "Pagada"]})
         for interno in ("Ana Gomez", "admin", "op", "recepcion", "1800", "6000", "efectivo"):
             with self.subTest(interno=interno):
-                self.assertNotIn(interno, texto.replace("En proceso", "").replace(self.codigo, ""))
+                self.assertNotIn(interno, sin_pago.replace("En proceso", "").replace(self.codigo, ""))
+        self.assertNotIn("efectivo", texto)
 
     def test_la_respuesta_publica_no_trae_observaciones_ni_motivos(self):
         self.recorrer("abono", "clasificar", "asignar", "procesar")
