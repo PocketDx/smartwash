@@ -4,9 +4,9 @@ import { useState, type FormEvent } from "react";
 
 import { AlertaErrores } from "@/app/catalogo/errores";
 import { leerErroresApi, rastrearOrden, type SeguimientoOrden } from "@/lib/api";
-import { formatFecha } from "@/lib/format";
 import { ClayBadge, ClayButton, ClayCard, ClayField, ClayInput } from "../components/ui/clay";
 import { COLOR_ESTADO } from "../ordenes/tabla-ordenes";
+import LineaTiempo, { fechaLarga, fechaYHora } from "./linea-tiempo";
 
 type Fallo = { titulo: string; mensaje: string };
 
@@ -15,22 +15,51 @@ function normalizar(codigo: string) {
   return codigo.replace(/\s+/g, "").toUpperCase();
 }
 
+function Aviso({ orden }: { orden: SeguimientoOrden }) {
+  let texto: string | null = null;
+  if (orden.cancelada) {
+    texto = orden.fecha_cancelacion
+      ? `Esta orden fue cancelada el ${fechaYHora(orden.fecha_cancelacion)}`
+      : "Esta orden fue cancelada.";
+  } else if (orden.estado === "En espera") {
+    texto = "Pendiente de abono: la fecha de entrega se asigna al abonar.";
+  } else if (orden.con_novedad) {
+    texto = "Tu pedido tiene una novedad. Te contactaremos.";
+  } else if (orden.estado === "Lista para entrega") {
+    texto = "Tu pedido esta listo: ya puedes recogerlo.";
+  }
+  if (!texto) return null;
+  return (
+    <p role="status" className="clay-sm mt-4 border-l-8 border-l-(--sw-accent) p-3 text-sm font-semibold text-(--sw-ink)">
+      {texto}
+    </p>
+  );
+}
+
 function Detalle({ orden }: { orden: SeguimientoOrden }) {
-  if (orden.estado === "En espera") {
-    return <p className="mt-3 text-sm text-(--sw-ink)">Pendiente de abono: la fecha de entrega se asigna al abonar.</p>;
-  }
-  if (orden.estado === "Cancelada") {
-    return <p className="mt-3 text-sm font-semibold text-(--sw-ink)">Esta orden fue cancelada.</p>;
-  }
+  const pendienteDeEntrega = !orden.cancelada && orden.estado !== "Entregada";
   return (
     <>
-      {orden.estado === "Lista para entrega" && (
-        <p className="mt-3 text-sm font-semibold text-(--sw-ink)">Tu pedido esta listo: ya puedes recogerlo.</p>
-      )}
-      {orden.fecha_estimada_entrega && (
-        <p className="mt-3 text-sm text-(--sw-ink-soft)">
-          Entrega estimada: {formatFecha(orden.fecha_estimada_entrega)}
+      <Aviso orden={orden} />
+      <div className="mt-5">
+        <LineaTiempo orden={orden} />
+      </div>
+      {pendienteDeEntrega && orden.fecha_estimada_entrega && (
+        <p className="mt-5 text-sm text-(--sw-ink-soft)">
+          Entrega estimada: <strong className="text-(--sw-ink)">{fechaLarga(orden.fecha_estimada_entrega)}</strong>
         </p>
+      )}
+      {orden.eventos.length > 0 && (
+        <details className="mt-4 text-sm">
+          <summary className="cursor-pointer font-semibold text-(--sw-ink)">Ver movimientos</summary>
+          <ol className="mt-2 flex flex-col gap-1 text-(--sw-ink-soft)">
+            {orden.eventos.map((e, i) => (
+              <li key={`${e.fecha}-${i}`}>
+                <span className="text-(--sw-ink)">{e.etiqueta}</span> · {fechaYHora(e.fecha)}
+              </li>
+            ))}
+          </ol>
+        </details>
       )}
     </>
   );
