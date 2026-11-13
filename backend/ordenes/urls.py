@@ -24,6 +24,7 @@ from .views import (
     OrdenListCreateView,
     OrdenesConNovedadView,
     PagoDanoView,
+    QuejaCreateView,
     RegistrarEntregaView,
 )
 
@@ -70,4 +71,5 @@ urlpatterns = [
     path("danos", DanosView.as_view(), name="danos"),
     path("danos/<int:pk>/pago", PagoDanoView.as_view(), name="dano-pago"),
     path("danos/<int:pk>/foto", FotoDanoView.as_view(), name="dano-foto"),
+    path("pqrs", QuejaCreateView.as_view(), name="pqrs"),
 ]
