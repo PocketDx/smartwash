@@ -1,13 +1,20 @@
-from datetime import date
+import base64
+from types import SimpleNamespace
+from zoneinfo import ZoneInfo
+from datetime import date, datetime
+from datetime import timezone as dt_timezone
 from decimal import Decimal
 from unittest import mock
 
 from django.contrib.auth import get_user_model
+from django.core import mail
 from django.core.exceptions import PermissionDenied
 from django.core.exceptions import ValidationError as DjangoValidationError
-from django.db import IntegrityError, OperationalError, transaction
+from django.db import IntegrityError, OperationalError, connection, transaction
+from django.db.migrations.executor import MigrationExecutor
 from django.db.models import ProtectedError
-from django.test import TestCase, TransactionTestCase, override_settings
+from django.test import SimpleTestCase, TestCase, TransactionTestCase, override_settings
+from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 from rest_framework.test import APITestCase
 
@@ -15,14 +22,20 @@ from catalogo.models import Material, NivelDificultad, Servicio, Tarifa, TipoPre
 from clientes.models import Cliente
 from fidelizacion.models import ReglaDescuento
 
+from .estimacion import calcular_fecha_estimada, horas_en_proceso, sumar_dias_habiles
 from .historial import OperacionNoCompletada, operacion_sobre_orden, registrar_evento
 from .models import (
+    Comprobante,
+    CambioConfiguracionDescuento,
+    ConfiguracionDescuentoNovedad,
+    DanoPrenda,
+    FotoNovedad,
     HistorialOrden,
+    Novedad,
     Orden,
     OrdenServicio,
     Prenda,
-    duracion_estimada_dias,
-    sumar_dias_habiles,
+    Queja,
 )
 
 User = get_user_model()
@@ -414,7 +427,7 @@ class RegistrarOrdenApiTests(CatalogoDePruebaMixin, APITestCase):
         self.crear_catalogo()
         self.client.force_authenticate(self.recepcionista)
 
-    def test_registra_la_orden_en_espera_con_valor_abono_duracion_e_historial(self):
+    def test_registra_la_orden_en_espera_con_valor_abono_e_historial(self):
         response = self.registrar(self.prenda(self.lavado, self.planchado, color="azul"))
 
         self.assertEqual(response.status_code, 201, response.json())
@@ -425,7 +438,6 @@ class RegistrarOrdenApiTests(CatalogoDePruebaMixin, APITestCase):
         # Lavado: 4000 por kilo x 2,5 kg. Planchado: 6000 por prenda.
         self.assertEqual(Decimal(datos["valor_total"]), Decimal("16000"))
         self.assertEqual(Decimal(datos["abono_requerido"]), Decimal("4800"))
-        self.assertEqual(datos["duracion_estimada_dias"], 2)
         self.assertIsNone(datos["fecha_estimada_entrega"])
         self.assertEqual(datos["detalle_prendas"][0]["color"], "azul")
         orden = Orden.objects.get()
@@ -563,14 +575,13 @@ class AgregarLineasApiTests(CatalogoDePruebaMixin, APITestCase):
             format="json",
         )
 
-    def test_agregar_una_prenda_recalcula_total_abono_y_duracion(self):
+    def test_agregar_una_prenda_recalcula_total_y_abono(self):
         response = self.agregar_prenda(self.lavado)
 
         self.assertEqual(response.status_code, 201, response.json())
         self.orden.refresh_from_db()
         self.assertEqual(self.orden.valor_total, Decimal("16000"))
         self.assertEqual(self.orden.abono_requerido, Decimal("4800"))
-        self.assertEqual(self.orden.duracion_estimada_dias, 2)
         self.assertEqual(self.orden.historial.last().tipo_evento, Evento.PRENDA_AGREGADA)
 
     def test_agregar_un_servicio_a_una_prenda_recalcula_y_queda_en_el_historial(self):
@@ -585,7 +596,6 @@ class AgregarLineasApiTests(CatalogoDePruebaMixin, APITestCase):
         self.assertEqual(self.agregar_servicio(self.planchado).status_code, 400)
 
     def test_con_el_abono_ya_alcanzado_no_se_pide_otro_y_se_recalcula_la_fecha(self):
-        # Viernes; la orden queda "Recibida" ese dia.
         Orden.objects.filter(pk=self.orden.pk).update(
             estado=Orden.Estado.RECIBIDA,
             abono_alcanzado_en=date(2026, 10, 9),
@@ -597,8 +607,10 @@ class AgregarLineasApiTests(CatalogoDePruebaMixin, APITestCase):
         self.orden.refresh_from_db()
         self.assertEqual(self.orden.valor_total, Decimal("16000"))
         self.assertEqual(self.orden.abono_requerido, Decimal("1800"))
-        # Dos servicios = 2 dias habiles: sabado y, saltando el domingo, lunes.
-        self.assertEqual(self.orden.fecha_estimada_entrega, date(2026, 10, 12))
+        # Recibida con una prenda: 12 h + 24 h + 12 h = 2 dias habiles desde hoy.
+        self.assertEqual(
+            self.orden.fecha_estimada_entrega, sumar_dias_habiles(timezone.localdate(), 2)
+        )
 
     def test_desde_en_proceso_no_se_agregan_prendas_ni_servicios(self):
         Orden.objects.filter(pk=self.orden.pk).update(estado=Orden.Estado.EN_PROCESO)
@@ -606,22 +618,6 @@ class AgregarLineasApiTests(CatalogoDePruebaMixin, APITestCase):
         self.assertEqual(self.agregar_prenda(self.planchado).status_code, 400)
         self.assertEqual(self.agregar_servicio(self.lavado).status_code, 400)
         self.assertEqual(self.orden.prendas.count(), 1)
-
-
-class DuracionEstimadaTests(TestCase):
-    def test_un_dia_base_mas_medio_dia_por_servicio_adicional_redondeado_hacia_arriba(self):
-        self.assertEqual(
-            [duracion_estimada_dias(n) for n in (1, 2, 3, 4)], [1, 2, 2, 3]
-        )
-
-    @override_settings(ORDEN_DURACION_POR_SERVICIO_ADICIONAL=Decimal("1"))
-    def test_los_valores_son_configurables(self):
-        self.assertEqual(duracion_estimada_dias(3), 3)
-
-    def test_cuenta_de_lunes_a_sabado_sin_domingos(self):
-        sabado = date(2026, 10, 10)
-        self.assertEqual(sumar_dias_habiles(sabado, 1), date(2026, 10, 12))
-        self.assertEqual(sumar_dias_habiles(date(2026, 10, 5), 5), sabado)
 
 
 class AbonoAntesDeAsignarTests(CatalogoDePruebaMixin, APITestCase):
@@ -880,23 +876,37 @@ class RegistrarEntregaApiTests(CatalogoDePruebaMixin, APITestCase):
         self.assertEqual(evento.usuario, self.recepcionista)
         self.assertIn("2 prendas verificadas, todas coinciden", evento.detalle)
 
-    def test_una_discrepancia_exige_observacion_y_queda_en_el_historial(self):
+    def test_una_prenda_que_no_coincide_exige_observacion_y_foto_y_deja_la_orden_con_novedad(self):
         self.lista_y_pagada()
-        sin_observacion = self.entregar(
-            {"prenda": self.camisa_1.pk, "coincide": True},
-            {"prenda": self.camisa_2.pk, "coincide": False, "observacion": "  "},
-        )
+        for incompleta in (
+            {"observacion": "  ", "foto": data_url(JPEG)},
+            {"observacion": "Mancha en el cuello"},
+        ):
+            with self.subTest(incompleta=incompleta):
+                response = self.entregar(
+                    {"prenda": self.camisa_1.pk, "coincide": True},
+                    {"prenda": self.camisa_2.pk, "coincide": False, **incompleta},
+                )
 
-        self.assertEqual(sin_observacion.status_code, 400)
-        self.assertIn("observacion", str(sin_observacion.json()))
+                self.assertEqual(response.status_code, 400)
+        self.assertFalse(Novedad.objects.exists())
 
         response = self.entregar(
             {"prenda": self.camisa_1.pk, "coincide": True},
-            {"prenda": self.camisa_2.pk, "coincide": False, "observacion": "Mancha en el cuello"},
+            {
+                "prenda": self.camisa_2.pk,
+                "coincide": False,
+                "observacion": "Mancha en el cuello",
+                "foto": data_url(JPEG),
+            },
         )
 
         self.assertEqual(response.status_code, 200)
-        self.assertIn("Mancha en el cuello", self.orden.historial.last().detalle)
+        self.orden.refresh_from_db()
+        self.assertEqual(self.orden.estado, Orden.Estado.CON_NOVEDAD)
+        evento = self.orden.historial.last()
+        self.assertEqual(evento.tipo_evento, Evento.NOVEDAD)
+        self.assertIn("Mancha en el cuello (con foto)", evento.detalle)
 
     def test_con_pago_incompleto_no_se_entrega_e_indica_el_saldo(self):
         self.lista_y_pagada(monto="10000")
@@ -1460,12 +1470,12 @@ class BandejaOperarioApiTests(CatalogoDePruebaMixin, APITestCase):
 
     def test_las_consultas_no_crecen_con_el_numero_de_ordenes(self):
         self.orden_asignada(self.operario)
-        with self.assertNumQueries(7):
+        with self.assertNumQueries(6):
             self.bandeja()
 
         for _ in range(3):
             self.orden_asignada(self.operario)
-        with self.assertNumQueries(7):
+        with self.assertNumQueries(6):
             self.assertEqual(len(self.bandeja().json()), 4)
 
 
@@ -1755,3 +1765,2669 @@ class PrecioPorServicioTests(CatalogoDePruebaMixin, APITestCase):
                     self.assertEqual(self.client.patch(f"/api/catalogo/{ruta}", datos, format="json").status_code, 403)
         general.refresh_from_db()
         self.assertEqual(general.precio_por_kilo, Decimal("8000"))
+
+
+class HistorialClienteApiTests(APITestCase):
+    def setUp(self):
+        self.admin = User.objects.create_user(
+            username="admin", password="x", rol=User.Rol.ADMINISTRADOR
+        )
+        self.antigua = crear_orden(codigo="SW-ANTIGUA")
+        self.cancelada = crear_orden(codigo="SW-CANCELA")
+        self.reciente = crear_orden(codigo="SW-RECIENT")
+        self.cliente = self.antigua.cliente
+        for dia, orden, estado, total in (
+            (1, self.antigua, Orden.Estado.EN_ESPERA, "20000"),
+            (2, self.cancelada, Orden.Estado.CANCELADA, "50000"),
+            (3, self.reciente, Orden.Estado.RECIBIDA, "35000"),
+        ):
+            Orden.objects.filter(pk=orden.pk).update(
+                creado_en=datetime(2026, 5, dia, tzinfo=dt_timezone.utc), estado=estado, valor_total=Decimal(total)
+            )
+        otro = Cliente.objects.create(documento="555", nombre_completo="Otro", telefono="300")
+        Orden.objects.create(cliente=otro, recepcionista=self.antigua.recepcionista)
+        self.url = f"/api/clientes/{self.cliente.pk}/ordenes"
+
+    def test_lista_todas_las_ordenes_del_cliente_de_la_mas_reciente_a_la_mas_antigua(self):
+        self.client.force_login(self.admin)
+        response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, 200)
+        datos = response.json()
+        self.assertEqual(
+            [(o["codigo"], o["estado"], o["valor_total"]) for o in datos["ordenes"]],
+            [
+                ("SW-RECIENT", "Recibida", "35000.00"),
+                ("SW-CANCELA", "Cancelada", "50000.00"),
+                ("SW-ANTIGUA", "En espera", "20000.00"),
+            ],
+        )
+        self.assertTrue(all(o["creado_en"] and o["estado_pago"] for o in datos["ordenes"]))
+        self.assertEqual(datos["cliente"], {"id": self.cliente.pk, "nombre_completo": "Ana Gomez"})
+
+    def test_el_total_comprado_excluye_las_canceladas_y_el_conteo_las_incluye(self):
+        self.client.force_login(self.admin)
+        datos = self.client.get(self.url).json()
+
+        self.assertEqual(datos["numero_ordenes"], 3)
+        self.assertEqual(datos["total_comprado"], "55000.00")
+
+    def test_un_cliente_sin_ordenes_recibe_lista_vacia_y_total_cero(self):
+        nuevo = Cliente.objects.create(documento="777", nombre_completo="Nuevo", telefono="301")
+        self.client.force_login(self.admin)
+        datos = self.client.get(f"/api/clientes/{nuevo.pk}/ordenes").json()
+
+        self.assertEqual(
+            (datos["ordenes"], datos["numero_ordenes"], datos["total_comprado"]), ([], 0, "0.00")
+        )
+
+    def test_un_cliente_inexistente_responde_404(self):
+        self.client.force_login(self.admin)
+        self.assertEqual(self.client.get("/api/clientes/9999/ordenes").status_code, 404)
+
+    def test_la_recepcionista_consulta_y_el_operario_recibe_403(self):
+        self.client.force_login(self.antigua.recepcionista)
+        self.assertEqual(self.client.get(self.url).status_code, 200)
+
+        operario = User.objects.create_user(username="op", password="x", rol=User.Rol.OPERARIO)
+        self.client.force_login(operario)
+        self.assertEqual(self.client.get(self.url).status_code, 403)
+
+    def test_la_consulta_no_permite_escribir(self):
+        self.client.force_login(self.admin)
+        for metodo in ("post", "put", "patch", "delete"):
+            response = getattr(self.client, metodo)(self.url, {}, format="json")
+            self.assertEqual(response.status_code, 405, metodo)
+
+
+# 2026-05-10 03:00 UTC sigue siendo el 9 de mayo (22:00) en Bogota.
+AHORA = datetime(2026, 5, 10, 3, 0, tzinfo=dt_timezone.utc)
+
+
+@mock.patch("django.utils.timezone.now", return_value=AHORA)
+class AlertasVencimientoApiTests(APITestCase):
+    url = "/api/ordenes/alertas"
+
+    def setUp(self):
+        self.admin = User.objects.create_user(
+            username="admin", password="x", rol=User.Rol.ADMINISTRADOR
+        )
+        self.operario = User.objects.create_user(
+            username="op", password="x", rol=User.Rol.OPERARIO
+        )
+
+    def orden(self, codigo, estado, fecha, operario=None):
+        orden = crear_orden(codigo=codigo)
+        Orden.objects.filter(pk=orden.pk).update(
+            estado=estado, fecha_estimada_entrega=fecha, operario=operario
+        )
+        return orden
+
+    def alertas(self, usuario):
+        self.client.force_login(usuario)
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, 200)
+        return [(a["codigo"], a["tipo"], a["dias"]) for a in response.json()]
+
+    def test_prioriza_las_mas_retrasadas_y_luego_las_mas_proximas(self, _now):
+        self.orden("SW-PROX2", Orden.Estado.CLASIFICADA, date(2026, 5, 11))
+        self.orden("SW-RETR1", Orden.Estado.EN_PROCESO, date(2026, 5, 8))
+        self.orden("SW-HOY", Orden.Estado.LISTA, date(2026, 5, 9))
+        self.orden("SW-RETR3", Orden.Estado.RECIBIDA, date(2026, 5, 6))
+        self.orden("SW-LEJOS", Orden.Estado.CONTROL_CALIDAD, date(2026, 5, 12))
+
+        self.assertEqual(
+            self.alertas(self.admin),
+            [
+                ("SW-RETR3", "retrasada", 3),
+                ("SW-RETR1", "retrasada", 1),
+                ("SW-HOY", "proxima", 0),
+                ("SW-PROX2", "proxima", 2),
+            ],
+        )
+
+    def test_hoy_es_la_fecha_de_bogota_y_no_la_de_utc(self, _now):
+        self.orden("SW-HOY", Orden.Estado.EN_PROCESO, date(2026, 5, 9))
+
+        self.assertEqual(self.alertas(self.admin), [("SW-HOY", "proxima", 0)])
+
+    def test_excluye_en_espera_canceladas_y_entregadas(self, _now):
+        vencida = date(2026, 5, 1)
+        crear_orden(codigo="SW-ESPERA")
+        self.orden("SW-CANCEL", Orden.Estado.CANCELADA, vencida)
+        self.orden("SW-ENTREG", Orden.Estado.ENTREGADA, vencida)
+
+        self.assertEqual(self.alertas(self.admin), [])
+
+    def test_una_orden_con_novedad_sigue_alertando(self, _now):
+        self.orden("SW-NOVEDAD", Orden.Estado.CON_NOVEDAD, date(2026, 5, 8))
+
+        self.assertEqual(self.alertas(self.admin), [("SW-NOVEDAD", "retrasada", 1)])
+
+    def test_la_recepcionista_ve_todas_y_el_operario_solo_las_suyas(self, _now):
+        self.orden("SW-MIA", Orden.Estado.EN_PROCESO, date(2026, 5, 8), self.operario)
+        self.orden("SW-OTRA", Orden.Estado.EN_PROCESO, date(2026, 5, 8))
+
+        recepcionista = User.objects.get(username="recepcion")
+        self.assertEqual(len(self.alertas(recepcionista)), 2)
+        self.assertEqual(self.alertas(self.operario), [("SW-MIA", "retrasada", 1)])
+
+    def test_si_la_base_falla_responde_500_registra_el_error_y_no_modifica_nada(self, _now):
+        self.orden("SW-RETR", Orden.Estado.EN_PROCESO, date(2026, 5, 8))
+        antes = list(Orden.objects.values_list("codigo", "estado", "fecha_estimada_entrega"))
+        self.client.force_login(self.admin)
+        self.client.raise_request_exception = False
+
+        with mock.patch.object(
+            Orden.objects, "filter", side_effect=OperationalError("sin conexion")
+        ), self.assertLogs("django.request", level="ERROR") as logs:
+            response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, 500)
+        self.assertIn("sin conexion", "\n".join(logs.output))
+        self.assertEqual(
+            list(Orden.objects.values_list("codigo", "estado", "fecha_estimada_entrega")), antes
+        )
+
+
+def data_url(datos, tipo="image/jpeg"):
+    return f"data:{tipo};base64,{base64.b64encode(datos).decode()}"
+
+
+JPEG = b"\xff\xd8\xff\xe0" + b"0" * 100
+PNG = b"\x89PNG\r\n\x1a\n" + b"0" * 100
+
+
+class OrdenEnProcesoMixin(CatalogoDePruebaMixin):
+    def setUp(self):
+        self.crear_catalogo()
+        self.admin = User.objects.create_user(
+            username="admin", password="x", rol=User.Rol.ADMINISTRADOR
+        )
+        self.operario = User.objects.create_user(
+            username="op", password="x", rol=User.Rol.OPERARIO
+        )
+        self.otro_operario = User.objects.create_user(
+            username="op2", password="x", rol=User.Rol.OPERARIO
+        )
+        self.client.force_authenticate(self.recepcionista)
+        self.registrar(self.prenda(self.planchado), self.prenda(self.planchado))
+        self.orden = Orden.objects.get()
+        self.camisa_1, self.camisa_2 = self.orden.prendas.all()
+        Orden.objects.filter(pk=self.orden.pk).update(
+            estado=Orden.Estado.EN_PROCESO, operario=self.operario, abono_alcanzado_en=date(2026, 5, 1)
+        )
+        self.url = f"/api/ordenes/{self.orden.pk}/novedades"
+
+    def registrar_novedad(self, usuario=None, **datos):
+        self.client.force_authenticate(usuario or self.operario)
+        cuerpo = {"prenda": self.camisa_1.pk, "descripcion": "Mancha de tinta", "foto": data_url(JPEG)}
+        cuerpo.update(datos)
+        return self.client.post(self.url, {k: v for k, v in cuerpo.items() if v is not ...}, format="json")
+
+
+
+class NovedadApiTests(OrdenEnProcesoMixin, APITestCase):
+    def assertSinCambios(self, estado=Orden.Estado.EN_PROCESO):
+        self.orden.refresh_from_db()
+        self.assertEqual(self.orden.estado, estado)
+        self.assertFalse(Novedad.objects.exists())
+        self.assertFalse(FotoNovedad.objects.exists())
+        self.assertFalse(self.orden.historial.filter(tipo_evento=Evento.NOVEDAD).exists())
+
+    def test_el_operario_registra_la_novedad_con_foto_y_la_orden_queda_con_novedad(self):
+        response = self.registrar_novedad()
+
+        self.assertEqual(response.status_code, 201, response.json())
+        self.orden.refresh_from_db()
+        self.assertEqual(self.orden.estado, Orden.Estado.CON_NOVEDAD)
+        novedad = Novedad.objects.get()
+        self.assertEqual(
+            (novedad.prenda, novedad.descripcion, novedad.origen, novedad.estado_anterior),
+            (self.camisa_1, "Mancha de tinta", Novedad.Origen.PROCESO, Orden.Estado.EN_PROCESO),
+        )
+        self.assertEqual((novedad.foto.tipo, novedad.foto.tamano), ("image/jpeg", len(JPEG)))
+        self.assertEqual(response.json()["foto_url"], f"/api/novedades/{novedad.pk}/foto")
+        evento = self.orden.historial.last()
+        self.assertEqual((evento.tipo_evento, evento.usuario), (Evento.NOVEDAD, self.operario))
+        self.assertIn(str(self.camisa_1), evento.detalle)
+        self.assertIn("Mancha de tinta (con foto)", evento.detalle)
+
+    def test_el_administrador_registra_desde_control_de_calidad_con_base64_sin_prefijo(self):
+        Orden.objects.filter(pk=self.orden.pk).update(estado=Orden.Estado.CONTROL_CALIDAD)
+
+        response = self.registrar_novedad(self.admin, foto=base64.b64encode(PNG).decode())
+
+        self.assertEqual(response.status_code, 201, response.json())
+        self.assertEqual(Novedad.objects.get().foto.tipo, "image/png")
+
+    def test_sin_foto_durante_el_proceso_se_rechaza(self):
+        for foto in (..., "", None):
+            with self.subTest(foto=foto):
+                response = self.registrar_novedad(foto=foto)
+                self.assertEqual(response.status_code, 400)
+                self.assertIn("La fotografia es obligatoria.", response.json()["foto"])
+        self.assertSinCambios()
+
+    def test_sin_descripcion_se_rechaza(self):
+        response = self.registrar_novedad(descripcion="   ")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("La descripcion es obligatoria.", response.json()["descripcion"])
+        self.assertSinCambios()
+
+    def test_un_archivo_que_no_es_imagen_o_supera_500_kb_se_rechaza(self):
+        casos = {
+            data_url(b"%PDF-1.4 no soy imagen", "image/jpeg"): "no es una imagen",
+            "esto no es base64!": "base64",
+            data_url(b"\xff\xd8\xff" + b"0" * (500 * 1024)): "maximo es 500 KB",
+        }
+        for foto, motivo in casos.items():
+            with self.subTest(motivo=motivo):
+                response = self.registrar_novedad(foto=foto)
+                self.assertEqual(response.status_code, 400)
+                self.assertIn(motivo, response.json()["foto"][0])
+        self.assertSinCambios()
+
+    def test_una_foto_de_500_kb_exactos_se_acepta(self):
+        foto = data_url(b"\xff\xd8\xff" + b"0" * (500 * 1024 - 3))
+
+        self.assertEqual(self.registrar_novedad(foto=foto).status_code, 201)
+
+    def test_el_operario_no_asignado_y_la_recepcionista_no_pueden_registrarla(self):
+        for usuario in (self.otro_operario, self.recepcionista):
+            with self.subTest(usuario=usuario.username):
+                self.assertEqual(self.registrar_novedad(usuario).status_code, 403)
+        self.assertSinCambios()
+
+    def test_solo_se_registra_en_proceso_o_control_de_calidad(self):
+        for estado in (Orden.Estado.CLASIFICADA, Orden.Estado.LISTA, Orden.Estado.CON_NOVEDAD):
+            Orden.objects.filter(pk=self.orden.pk).update(estado=estado)
+            with self.subTest(estado=estado):
+                self.assertEqual(self.registrar_novedad().status_code, 400)
+        self.assertFalse(Novedad.objects.exists())
+
+    def test_una_prenda_de_otra_orden_se_rechaza(self):
+        response = self.registrar_novedad(prenda=999)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertSinCambios()
+
+    def test_una_orden_con_novedad_no_avanza_de_estado(self):
+        self.registrar_novedad()
+
+        for usuario in (self.operario, self.admin):
+            self.client.force_authenticate(usuario)
+            response = self.client.post(
+                f"/api/ordenes/{self.orden.pk}/estado",
+                {"estado": Orden.Estado.CONTROL_CALIDAD},
+                format="json",
+            )
+            self.assertEqual(response.status_code, 400)
+            self.assertIn("novedad pendiente", str(response.json()))
+        self.orden.refresh_from_db()
+        self.assertEqual(self.orden.estado, Orden.Estado.CON_NOVEDAD)
+
+    def test_una_orden_con_novedad_no_se_entrega_ni_se_reasigna(self):
+        self.registrar_novedad()
+        self.client.force_authenticate(self.admin)
+
+        entrega = self.client.post(
+            f"/api/ordenes/{self.orden.pk}/entrega",
+            {"prendas": [{"prenda": p.pk, "coincide": True} for p in (self.camisa_1, self.camisa_2)]},
+            format="json",
+        )
+        asignacion = self.client.post(
+            f"/api/ordenes/{self.orden.pk}/asignacion",
+            {"operario": self.otro_operario.pk},
+            format="json",
+        )
+
+        self.assertEqual((entrega.status_code, asignacion.status_code), (400, 400))
+        self.orden.refresh_from_db()
+        self.assertEqual(
+            (self.orden.estado, self.orden.operario), (Orden.Estado.CON_NOVEDAD, self.operario)
+        )
+
+    def test_si_la_base_falla_no_queda_novedad_ni_foto_ni_cambio_de_estado(self):
+        with mock.patch(
+            "ordenes.serializers.registrar_evento", side_effect=OperationalError("sin conexion")
+        ), self.assertLogs("ordenes.historial", level="ERROR") as logs:
+            response = self.registrar_novedad()
+
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("sin conexion", "\n".join(logs.output))
+        self.assertSinCambios()
+
+    def test_la_foto_la_ven_el_administrador_la_recepcionista_y_el_operario_asignado(self):
+        self.registrar_novedad()
+        url = f"/api/novedades/{Novedad.objects.get().pk}/foto"
+
+        for usuario in (self.admin, self.recepcionista, self.operario):
+            with self.subTest(usuario=usuario.username):
+                self.client.force_authenticate(usuario)
+                response = self.client.get(url)
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response["Content-Type"], "image/jpeg")
+                self.assertEqual(response.content, JPEG)
+
+        self.client.force_authenticate(self.otro_operario)
+        self.assertEqual(self.client.get(url).status_code, 403)
+        self.client.force_authenticate(None)
+        self.assertEqual(self.client.get(url).status_code, 403)
+
+    def test_el_listado_de_novedades_no_incluye_el_contenido_de_la_foto(self):
+        self.registrar_novedad()
+        self.client.force_authenticate(self.recepcionista)
+
+        novedades = self.client.get(self.url).json()
+
+        self.assertEqual(len(novedades), 1)
+        self.assertNotIn("contenido", novedades[0])
+        self.assertEqual(novedades[0]["usuario_nombre"], "op")
+        self.client.force_authenticate(self.otro_operario)
+        self.assertEqual(self.client.get(self.url).status_code, 403)
+
+    def test_en_la_entrega_cada_prenda_que_no_coincide_es_una_novedad_y_hay_un_solo_evento(self):
+        self.client.post(
+            f"/api/ordenes/{self.orden.pk}/pagos",
+            {"monto": "12000", "metodo": "efectivo"},
+            format="json",
+        )
+        Orden.objects.filter(pk=self.orden.pk).update(estado=Orden.Estado.LISTA)
+        eventos_antes = self.orden.historial.count()
+        self.client.force_authenticate(self.recepcionista)
+
+        response = self.client.post(
+            f"/api/ordenes/{self.orden.pk}/entrega",
+            {
+                "prendas": [
+                    {
+                        "prenda": self.camisa_1.pk,
+                        "resultado": "novedad",
+                        "observacion": "Falta un boton",
+                        "foto": data_url(PNG),
+                    },
+                    {
+                        "prenda": self.camisa_2.pk,
+                        "resultado": "novedad",
+                        "observacion": "Otro color",
+                        "foto": data_url(JPEG),
+                    },
+                ]
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200, response.json())
+        self.orden.refresh_from_db()
+        self.assertEqual(self.orden.estado, Orden.Estado.CON_NOVEDAD)
+        self.assertIsNone(self.orden.fecha_entrega)
+        novedades = list(Novedad.objects.order_by("id"))
+        self.assertEqual(
+            [(n.prenda, n.origen, n.estado_anterior, n.foto.tipo) for n in novedades],
+            [
+                (self.camisa_1, Novedad.Origen.ENTREGA, Orden.Estado.LISTA, "image/png"),
+                (self.camisa_2, Novedad.Origen.ENTREGA, Orden.Estado.LISTA, "image/jpeg"),
+            ],
+        )
+        self.assertEqual(self.orden.historial.count(), eventos_antes + 1)
+        evento = self.orden.historial.last()
+        self.assertEqual((evento.tipo_evento, evento.usuario), (Evento.NOVEDAD, self.recepcionista))
+        self.assertIn("detectada en la entrega", evento.detalle)
+        self.assertIn("Falta un boton (con foto)", evento.detalle)
+        self.assertIn("Otro color (con foto)", evento.detalle)
+
+
+class DecisionNovedadApiTests(OrdenEnProcesoMixin, APITestCase):
+    url_lista = "/api/ordenes/novedades"
+
+    def decidir(self, decision, observacion="Hable con Ana por telefono", usuario=None, **extra):
+        self.client.force_authenticate(usuario or self.recepcionista)
+        return self.client.post(
+            f"/api/ordenes/{self.orden.pk}/decision",
+            {"decision": decision, "observacion": observacion, **extra},
+            format="json",
+        )
+
+    def novedad_en_la_entrega(self):
+        self.client.force_authenticate(self.recepcionista)
+        self.client.post(
+            f"/api/ordenes/{self.orden.pk}/pagos", {"monto": "12000", "metodo": "efectivo"}, format="json"
+        )
+        Orden.objects.filter(pk=self.orden.pk).update(estado=Orden.Estado.LISTA)
+        self.client.post(
+            f"/api/ordenes/{self.orden.pk}/entrega",
+            {
+                "prendas": [
+                    {
+                        "prenda": self.camisa_1.pk,
+                        "resultado": "novedad",
+                        "observacion": "Falta un boton",
+                        "foto": data_url(JPEG),
+                    },
+                    {"prenda": self.camisa_2.pk, "resultado": "coincide"},
+                ]
+            },
+            format="json",
+        )
+
+    def ultimo_evento(self):
+        return self.orden.historial.last()
+
+    def test_la_lista_muestra_cada_orden_con_novedad_y_sus_novedades_pendientes(self):
+        self.registrar_novedad()
+        self.client.force_authenticate(self.admin)
+
+        ordenes = self.client.get(self.url_lista).json()
+
+        self.assertEqual([o["codigo"] for o in ordenes], [self.orden.codigo])
+        novedad = ordenes[0]["novedades"][0]
+        self.assertEqual(ordenes[0]["operario_nombre"], "op")
+        self.assertEqual(
+            (novedad["prenda"], novedad["descripcion"], novedad["usuario_nombre"], novedad["origen"]),
+            (self.camisa_1.pk, "Mancha de tinta", "op", Novedad.Origen.PROCESO),
+        )
+        self.assertTrue(novedad["foto_url"] and novedad["creado_en"])
+
+    def test_la_lista_muestra_la_novedad_de_la_entrega_con_foto_y_omite_las_resueltas(self):
+        self.novedad_en_la_entrega()
+        self.client.force_authenticate(self.recepcionista)
+
+        novedad = self.client.get(self.url_lista).json()[0]["novedades"][0]
+        self.assertEqual(novedad["origen"], Novedad.Origen.ENTREGA)
+        self.assertTrue(novedad["foto_url"])
+
+        self.decidir(Novedad.Decision.REPROCESAR_CON_DESCUENTO)
+        self.assertEqual(self.client.get(self.url_lista).json(), [])
+
+    def test_continuar_igual_devuelve_la_orden_al_estado_de_origen(self):
+        Orden.objects.filter(pk=self.orden.pk).update(estado=Orden.Estado.CONTROL_CALIDAD)
+        self.registrar_novedad()
+
+        response = self.decidir(Novedad.Decision.CONTINUAR)
+
+        self.assertEqual(response.status_code, 200, response.json())
+        self.orden.refresh_from_db()
+        self.assertEqual(self.orden.estado, Orden.Estado.CONTROL_CALIDAD)
+        novedad = Novedad.objects.get()
+        self.assertEqual(
+            (novedad.decision, novedad.decidida_por, novedad.decision_observacion),
+            (Novedad.Decision.CONTINUAR, self.recepcionista, "Hable con Ana por telefono"),
+        )
+        self.assertIsNotNone(novedad.decidida_en)
+        evento = self.ultimo_evento()
+        self.assertEqual(
+            (evento.tipo_evento, evento.usuario), (Evento.DECISION_NOVEDAD, self.recepcionista)
+        )
+        self.assertIn("Continuar igual: Hable con Ana por telefono", evento.detalle)
+        self.assertIn("→ Control de calidad", evento.detalle)
+
+    def agregar(self, *servicios, prenda=None, usuario=None):
+        prenda = prenda or self.camisa_1
+        return self.decidir(
+            Novedad.Decision.AGREGAR_SERVICIO,
+            "Ana pide lavarla tambien",
+            usuario=usuario,
+            servicios=[{"prenda": prenda.pk, "servicio": s.pk} for s in servicios],
+        )
+
+    def test_agregar_servicio_suma_al_total_y_al_saldo_y_corre_la_fecha_desde_hoy(self):
+        Orden.objects.filter(pk=self.orden.pk).update(estado=Orden.Estado.CONTROL_CALIDAD)
+        self.registrar_novedad()
+        self.orden.refresh_from_db()
+        total, abono = self.orden.valor_total, self.orden.abono_requerido
+
+        response = self.agregar(self.lavado, usuario=self.admin)
+
+        self.assertEqual(response.status_code, 200, response.json())
+        self.orden.refresh_from_db()
+        linea = self.camisa_1.servicios.get(tarifa__servicio=self.lavado)
+        self.assertEqual(self.orden.valor_total, total + linea.valor_aplicado)
+        self.assertEqual(self.orden.saldo_pendiente(), self.orden.valor_total)
+        self.assertEqual(self.orden.abono_requerido, abono)
+        self.assertEqual(self.orden.estado, Orden.Estado.EN_PROCESO)
+        self.assertEqual(
+            self.orden.fecha_estimada_entrega, sumar_dias_habiles(timezone.localdate(), 2)
+        )
+        self.assertEqual(Novedad.objects.get().decision, Novedad.Decision.AGREGAR_SERVICIO)
+        detalle = self.ultimo_evento().detalle
+        self.assertIn("Agregar servicio: Ana pide lavarla tambien", detalle)
+        self.assertIn(f"Nuevo total ${int(self.orden.valor_total)}", detalle)
+        self.assertIn("→ En proceso", detalle)
+
+    def test_agregar_servicio_exige_un_servicio_nuevo_para_la_prenda_con_novedad(self):
+        self.registrar_novedad()
+        casos = {
+            "Elige al menos un servicio": self.agregar(),
+            "Solo se agregan servicios a la prenda con novedad": self.agregar(
+                self.lavado, prenda=self.camisa_2
+            ),
+            "ya tiene": self.agregar(self.planchado),
+        }
+
+        for mensaje, response in casos.items():
+            with self.subTest(mensaje=mensaje):
+                self.assertEqual(response.status_code, 400)
+                self.assertIn(mensaje, str(response.json()))
+        self.orden.refresh_from_db()
+        self.assertEqual(self.orden.estado, Orden.Estado.CON_NOVEDAD)
+        self.assertFalse(OrdenServicio.objects.filter(tarifa__servicio=self.lavado).exists())
+
+    def test_la_novedad_del_proceso_ya_no_admite_reprocesar_ni_no_continuar(self):
+        self.registrar_novedad()
+
+        for decision in (Novedad.Decision.REPROCESAR, Novedad.Decision.NO_CONTINUAR):
+            with self.subTest(decision=decision):
+                response = self.decidir(decision)
+
+                self.assertEqual(response.status_code, 400)
+                self.assertIn('"Continuar igual", "Agregar servicio"', str(response.json()))
+        self.orden.refresh_from_db()
+        self.assertEqual(self.orden.estado, Orden.Estado.CON_NOVEDAD)
+
+    def test_sin_observacion_se_rechaza(self):
+        self.registrar_novedad()
+
+        response = self.decidir(Novedad.Decision.CONTINUAR, "  ")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("con quien se hablo", response.json()["observacion"][0])
+        self.orden.refresh_from_db()
+        self.assertEqual(self.orden.estado, Orden.Estado.CON_NOVEDAD)
+
+    def test_el_operario_no_registra_la_decision_ni_ve_la_lista(self):
+        self.registrar_novedad()
+
+        self.assertEqual(self.decidir(Novedad.Decision.CONTINUAR, usuario=self.operario).status_code, 403)
+        self.assertEqual(self.client.get(self.url_lista).status_code, 403)
+        self.client.force_authenticate(None)
+        self.assertEqual(self.client.get(self.url_lista).status_code, 403)
+
+    def test_sin_novedad_pendiente_se_rechaza(self):
+        response = self.decidir(Novedad.Decision.CONTINUAR)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("no tiene una novedad pendiente", str(response.json()))
+        self.assertFalse(self.orden.historial.filter(tipo_evento=Evento.DECISION_NOVEDAD).exists())
+
+    def test_si_la_base_falla_no_cambia_nada(self):
+        self.registrar_novedad()
+
+        with mock.patch(
+            "ordenes.serializers.registrar_evento", side_effect=OperationalError("sin conexion")
+        ), self.assertLogs("ordenes.historial", level="ERROR") as logs:
+            response = self.agregar(self.lavado)
+
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("sin conexion", "\n".join(logs.output))
+        self.orden.refresh_from_db()
+        self.assertEqual(self.orden.estado, Orden.Estado.CON_NOVEDAD)
+        self.assertFalse(OrdenServicio.objects.filter(tarifa__servicio=self.lavado).exists())
+        self.assertIsNone(Novedad.objects.get().decision)
+
+
+class ClasificacionPorConsumoTests(CatalogoDePruebaMixin, APITestCase):
+    def setUp(self):
+        self.crear_catalogo()
+        self.client.force_authenticate(self.recepcionista)
+        # Una prenda de planchado: 6000.
+        self.registrar(self.prenda(self.planchado))
+        self.orden = Orden.objects.get()
+        self.client.post(
+            f"/api/ordenes/{self.orden.pk}/pagos", {"monto": "6000", "metodo": "efectivo"}, format="json"
+        )
+        Orden.objects.filter(pk=self.orden.pk).update(estado=Orden.Estado.LISTA)
+
+    def ordenes_previas(self, estado, cantidad, valor="10000"):
+        for _ in range(cantidad):
+            orden = Orden.objects.create(cliente=self.cliente, recepcionista=self.recepcionista)
+            Orden.objects.filter(pk=orden.pk).update(estado=estado, valor_total=Decimal(valor))
+
+    def entregar(self, coincide=True, **extra):
+        prenda = {"prenda": self.orden.prendas.get().pk, "coincide": coincide, **extra}
+        return self.client.post(
+            f"/api/ordenes/{self.orden.pk}/entrega", {"prendas": [prenda]}, format="json"
+        )
+
+    def clasificacion(self):
+        self.cliente.refresh_from_db()
+        return self.cliente.clasificacion
+
+    def test_la_tercera_orden_cerrada_vuelve_frecuente_al_cliente_y_queda_en_el_historial(self):
+        self.ordenes_previas(Orden.Estado.ENTREGADA, 2)
+
+        response = self.entregar()
+
+        self.assertEqual(response.status_code, 200, response.json())
+        self.assertEqual(self.clasificacion(), Cliente.Clasificacion.FRECUENTE)
+        self.assertIn("Cliente: Ocasional → Frecuente", self.orden.historial.last().detalle)
+
+    def test_las_ordenes_canceladas_o_sin_cerrar_no_cuentan(self):
+        self.ordenes_previas(Orden.Estado.CANCELADA, 5, "200000")
+        self.ordenes_previas(Orden.Estado.EN_PROCESO, 5, "200000")
+
+        self.entregar()
+
+        self.assertEqual(self.clasificacion(), Cliente.Clasificacion.OCASIONAL)
+        self.assertNotIn("Cliente:", self.orden.historial.last().detalle)
+
+    def test_diez_ordenes_cerradas_hacen_vip(self):
+        self.ordenes_previas(Orden.Estado.ENTREGADA, 9, "1000")
+
+        self.entregar()
+
+        self.assertEqual(self.clasificacion(), Cliente.Clasificacion.VIP)
+
+    def test_500_mil_consumidos_hacen_vip_aunque_haya_pocas_ordenes(self):
+        self.ordenes_previas(Orden.Estado.ENTREGADA, 1, "494000")
+
+        self.entregar()
+
+        self.assertEqual(self.clasificacion(), Cliente.Clasificacion.VIP)
+        self.assertIn("Cliente: Ocasional → VIP", self.orden.historial.last().detalle)
+
+    def test_cuenta_el_valor_cobrado_con_descuento_y_no_el_subtotal(self):
+        self.ordenes_previas(Orden.Estado.ENTREGADA, 1, "493000")
+        Orden.objects.filter(valor_total=Decimal("493000")).update(
+            subtotal=Decimal("600000"), descuento=Decimal("107000")
+        )
+
+        self.entregar()
+
+        # Cobrado: 493000 + 6000 = 499000, mil por debajo del umbral VIP.
+        self.assertEqual(self.clasificacion(), Cliente.Clasificacion.OCASIONAL)
+
+    def test_la_clasificacion_nunca_baja(self):
+        Cliente.objects.filter(pk=self.cliente.pk).update(clasificacion=Cliente.Clasificacion.VIP)
+
+        self.entregar()
+
+        self.assertEqual(self.clasificacion(), Cliente.Clasificacion.VIP)
+
+    @override_settings(CLIENTE_FRECUENTE_MIN_ORDENES=1)
+    def test_los_umbrales_se_configuran_en_settings(self):
+        self.entregar()
+
+        self.assertEqual(self.clasificacion(), Cliente.Clasificacion.FRECUENTE)
+
+    def test_una_entrega_con_novedad_no_reclasifica(self):
+        self.ordenes_previas(Orden.Estado.ENTREGADA, 2)
+
+        response = self.entregar(coincide=False, observacion="Otro color", foto=data_url(JPEG))
+
+        self.assertEqual(response.status_code, 200, response.json())
+        self.assertEqual(self.clasificacion(), Cliente.Clasificacion.OCASIONAL)
+
+    def test_si_la_base_falla_no_se_entrega_ni_se_reclasifica(self):
+        self.ordenes_previas(Orden.Estado.ENTREGADA, 2)
+
+        with mock.patch(
+            "ordenes.views.registrar_evento", side_effect=OperationalError("sin conexion")
+        ), self.assertLogs("ordenes.historial", level="ERROR") as logs:
+            response = self.entregar()
+
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("sin conexion", "\n".join(logs.output))
+        self.orden.refresh_from_db()
+        self.assertEqual(self.orden.estado, Orden.Estado.LISTA)
+        self.assertEqual(self.clasificacion(), Cliente.Clasificacion.OCASIONAL)
+
+
+class AvisoOrdenListaTests(OrdenEnProcesoMixin, APITestCase):
+    def setUp(self):
+        super().setUp()
+        Cliente.objects.filter(pk=self.cliente.pk).update(correo="ana@example.com")
+        Orden.objects.filter(pk=self.orden.pk).update(estado=Orden.Estado.CONTROL_CALIDAD)
+
+    def cambiar_estado(self, estado):
+        self.client.force_authenticate(self.operario)
+        with self.captureOnCommitCallbacks(execute=True):
+            return self.client.post(
+                f"/api/ordenes/{self.orden.pk}/estado", {"estado": estado}, format="json"
+            )
+
+    def pagar(self, monto):
+        self.client.force_authenticate(self.recepcionista)
+        self.client.post(
+            f"/api/ordenes/{self.orden.pk}/pagos", {"monto": monto, "metodo": "efectivo"}, format="json"
+        )
+
+    def ultimo_aviso(self):
+        return self.orden.historial.filter(tipo_evento=Evento.NOTIFICACION).last()
+
+    def test_al_quedar_lista_se_avisa_al_cliente_con_el_saldo_pendiente(self):
+        self.pagar("2000")
+
+        response = self.cambiar_estado(Orden.Estado.LISTA)
+
+        self.assertEqual(response.status_code, 200, response.json())
+        self.assertEqual(len(mail.outbox), 1)
+        aviso = mail.outbox[0]
+        self.assertEqual(aviso.to, ["ana@example.com"])
+        self.assertIn(self.orden.codigo, aviso.subject)
+        self.assertIn("esta lista para recoger", aviso.body)
+        self.assertIn("Saldo pendiente por pagar al recogerla: $10.000.", aviso.body)
+        evento = self.ultimo_aviso()
+        self.assertIsNone(evento.usuario)
+        self.assertEqual(evento.detalle, "Aviso de orden lista enviado a ana@example.com.")
+
+    def test_si_esta_pagada_el_aviso_no_menciona_saldo(self):
+        self.pagar("12000")
+
+        self.cambiar_estado(Orden.Estado.LISTA)
+
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertNotIn("Saldo", mail.outbox[0].body)
+
+    def test_si_la_base_falla_no_cambia_el_estado_ni_se_avisa(self):
+        with mock.patch(
+            "ordenes.views.registrar_evento", side_effect=OperationalError("sin conexion")
+        ), self.assertLogs("ordenes.historial", level="ERROR"):
+            response = self.cambiar_estado(Orden.Estado.LISTA)
+
+        self.assertEqual(response.status_code, 503)
+        self.orden.refresh_from_db()
+        self.assertEqual(self.orden.estado, Orden.Estado.CONTROL_CALIDAD)
+        self.assertEqual(mail.outbox, [])
+        self.assertIsNone(self.ultimo_aviso())
+
+    def test_si_falla_el_correo_la_orden_sigue_lista_y_queda_constancia(self):
+        with mock.patch(
+            "ordenes.avisos.send_mail", side_effect=RuntimeError("Resend caido")
+        ), self.assertLogs("ordenes.avisos", level="ERROR") as logs:
+            response = self.cambiar_estado(Orden.Estado.LISTA)
+
+        self.assertEqual(response.status_code, 200)
+        self.orden.refresh_from_db()
+        self.assertEqual(self.orden.estado, Orden.Estado.LISTA)
+        self.assertIn("Resend caido", "\n".join(logs.output))
+        self.assertIn("No se pudo enviar el aviso", self.ultimo_aviso().detalle)
+
+    def test_sin_correo_no_se_envia_y_queda_la_indicacion_de_llamar(self):
+        Cliente.objects.filter(pk=self.cliente.pk).update(correo="")
+
+        self.cambiar_estado(Orden.Estado.LISTA)
+
+        self.assertEqual(mail.outbox, [])
+        self.assertIn("no tiene correo registrado", self.ultimo_aviso().detalle)
+
+    def test_otros_cambios_de_estado_no_avisan(self):
+        self.cambiar_estado(Orden.Estado.EN_PROCESO)
+
+        self.assertEqual(mail.outbox, [])
+        self.assertIsNone(self.ultimo_aviso())
+
+    def test_entregar_con_descuento_tras_una_novedad_de_la_entrega_no_vuelve_a_avisar(self):
+        self.pagar("12000")
+        Orden.objects.filter(pk=self.orden.pk).update(estado=Orden.Estado.LISTA)
+        with self.captureOnCommitCallbacks(execute=True):
+            self.client.post(
+                f"/api/ordenes/{self.orden.pk}/entrega",
+                {
+                    "prendas": [
+                        {
+                            "prenda": self.camisa_1.pk,
+                            "resultado": "novedad",
+                            "observacion": "Otro color",
+                            "foto": data_url(JPEG),
+                        },
+                        {"prenda": self.camisa_2.pk, "resultado": "coincide"},
+                    ]
+                },
+                format="json",
+            )
+            novedad = Novedad.objects.get()
+            self.client.post(
+                f"/api/ordenes/{self.orden.pk}/decision",
+                {
+                    "decision": "entregar_con_descuento",
+                    "observacion": "Ana acepta",
+                    "gravedades": [{"novedad": novedad.pk, "gravedad": "leve"}],
+                },
+                format="json",
+            )
+
+        self.orden.refresh_from_db()
+        self.assertEqual(self.orden.estado, Orden.Estado.ENTREGADA)
+        self.assertEqual(mail.outbox, [])
+        self.assertIsNone(self.ultimo_aviso())
+
+    def test_tras_un_reproceso_avisa_de_nuevo_al_quedar_lista(self):
+        self.cambiar_estado(Orden.Estado.EN_PROCESO)
+        self.cambiar_estado(Orden.Estado.CONTROL_CALIDAD)
+        self.cambiar_estado(Orden.Estado.LISTA)
+
+        self.assertEqual(len(mail.outbox), 1)
+
+
+class CancelarOrdenApiTests(CatalogoDePruebaMixin, APITestCase):
+    def setUp(self):
+        self.crear_catalogo()
+        self.client.force_authenticate(self.recepcionista)
+        # 16000 de valor total; abono minimo 4800.
+        self.registrar(self.prenda(self.lavado, self.planchado))
+        self.orden = Orden.objects.get()
+        self.operario = User.objects.create_user(
+            username="op1", password="x", rol=User.Rol.OPERARIO, first_name="Luis"
+        )
+        self.admin = User.objects.create_user(
+            username="jefe", password="x", rol=User.Rol.ADMINISTRADOR
+        )
+        self.url = f"/api/ordenes/{self.orden.pk}/cancelacion"
+
+    def cancelar(self, motivo="El cliente se retracto", usuario=None):
+        self.client.force_authenticate(usuario or self.recepcionista)
+        datos = {} if motivo is None else {"motivo": motivo}
+        return self.client.post(self.url, datos, format="json")
+
+    def pagar(self, monto):
+        return self.client.post(
+            f"/api/ordenes/{self.orden.pk}/pagos",
+            {"monto": monto, "metodo": "efectivo"},
+            format="json",
+        )
+
+    def fijar_estado(self, estado):
+        Orden.objects.filter(pk=self.orden.pk).update(estado=estado)
+
+    def eventos(self, tipo):
+        return HistorialOrden.objects.filter(orden=self.orden, tipo_evento=tipo)
+
+    def test_la_recepcionista_o_el_administrador_cancelan_antes_de_iniciar_el_servicio(self):
+        for usuario in (self.recepcionista, self.admin):
+            for estado in Orden.ESTADOS_CANCELABLES:
+                with self.subTest(usuario=usuario.username, estado=estado):
+                    self.fijar_estado(estado)
+
+                    response = self.cancelar("Orden registrada con error", usuario)
+
+                    self.assertEqual(response.status_code, 200, response.json())
+                    self.assertEqual(response.json()["estado"], "Cancelada")
+                    self.assertEqual(response.json()["motivo_cancelacion"], "Orden registrada con error")
+                    evento = self.eventos(Evento.CANCELACION).last()
+                    self.assertEqual(evento.usuario, usuario)
+                    self.assertEqual(
+                        evento.detalle, f"{estado} → Cancelada. Motivo: Orden registrada con error"
+                    )
+                    self.assertIsNotNone(evento.fecha)
+
+    def test_sin_pagos_no_registra_devolucion(self):
+        self.cancelar()
+
+        self.assertFalse(self.eventos(Evento.DEVOLUCION).exists())
+
+    def test_con_abono_registra_la_devolucion_sin_tocar_los_pagos(self):
+        self.pagar("3000")
+        self.pagar("2000")
+        pagos = list(self.orden.pagos.values_list("id", "monto"))
+
+        response = self.cancelar("El cliente se retracto")
+
+        self.assertEqual(response.status_code, 200, response.json())
+        evento = self.eventos(Evento.DEVOLUCION).get()
+        self.assertEqual(evento.usuario, self.recepcionista)
+        self.assertRegex(
+            evento.detalle, r"^\$5000(\.00)? devueltos al cliente\. Motivo: El cliente se retracto$"
+        )
+        self.assertEqual(list(self.orden.pagos.values_list("id", "monto")), pagos)
+
+    def test_rechaza_la_cancelacion_sin_motivo(self):
+        previo = self.orden.historial.count()
+
+        for motivo in (None, "", "   "):
+            with self.subTest(motivo=motivo):
+                response = self.cancelar(motivo)
+
+                self.assertEqual(response.status_code, 400)
+                self.assertIn("motivo", response.json())
+
+        self.orden.refresh_from_db()
+        self.assertEqual(self.orden.estado, Orden.Estado.EN_ESPERA)
+        self.assertEqual(self.orden.motivo_cancelacion, "")
+        self.assertEqual(self.orden.historial.count(), previo)
+
+    def test_rechaza_cancelar_cuando_el_servicio_ya_inicio(self):
+        previo = self.orden.historial.count()
+
+        for estado in (
+            Orden.Estado.EN_PROCESO,
+            Orden.Estado.CONTROL_CALIDAD,
+            Orden.Estado.LISTA,
+            Orden.Estado.ENTREGADA,
+        ):
+            with self.subTest(estado=estado):
+                self.fijar_estado(estado)
+
+                response = self.cancelar(usuario=self.admin)
+
+                self.assertEqual(response.status_code, 400)
+                self.assertIn("el servicio ya inicio", str(response.json()))
+                self.orden.refresh_from_db()
+                self.assertEqual(self.orden.estado, estado)
+
+        self.assertEqual(self.orden.historial.count(), previo)
+
+    def test_una_orden_cancelada_no_se_reactiva_asigna_avanza_amplia_ni_cobra(self):
+        self.pagar("4800")
+        self.cancelar()
+        previo = self.orden.historial.count()
+        self.client.force_authenticate(self.admin)
+        base = f"/api/ordenes/{self.orden.pk}"
+        prenda = self.orden.prendas.first()
+
+        intentos = {
+            "cancelar de nuevo": (self.url, {"motivo": "Otra vez"}),
+            "reactivar": (f"{base}/estado", {"estado": "Recibida"}),
+            "avanzar": (f"{base}/estado", {"estado": "Clasificada"}),
+            "asignar": (f"{base}/asignacion", {"operario": self.operario.pk}),
+            "agregar prenda": (f"{base}/prendas", self.prenda(self.lavado)),
+            "agregar servicio": (
+                f"{base}/prendas/{prenda.pk}/servicios",
+                {"servicio": self.lavado.pk},
+            ),
+            "registrar pago": (f"{base}/pagos", {"monto": "1000", "metodo": "efectivo"}),
+        }
+        for accion, (url, datos) in intentos.items():
+            with self.subTest(accion=accion):
+                response = self.client.post(url, datos, format="json")
+
+                self.assertEqual(response.status_code, 400, response.json())
+                self.assertIn("cancelada", str(response.json()))
+
+        self.orden.refresh_from_db()
+        self.assertEqual(self.orden.estado, Orden.Estado.CANCELADA)
+        self.assertIsNone(self.orden.operario)
+        self.assertEqual(self.orden.total_pagado(), Decimal("4800"))
+        self.assertEqual(self.orden.historial.count(), previo)
+
+    def test_la_orden_asignada_sale_de_la_bandeja_del_operario(self):
+        self.pagar("4800")
+        self.client.post(
+            f"/api/ordenes/{self.orden.pk}/asignacion",
+            {"operario": self.operario.pk},
+            format="json",
+        )
+
+        self.cancelar()
+
+        self.orden.refresh_from_db()
+        self.assertIsNone(self.orden.operario)
+        self.assertIn("Sale de la bandeja de Luis", self.eventos(Evento.CANCELACION).get().detalle)
+        self.client.force_authenticate(self.operario)
+        self.assertEqual(self.client.get("/api/ordenes/bandeja").json(), [])
+
+    def test_el_operario_recibe_403_al_cancelar(self):
+        response = self.cancelar(usuario=self.operario)
+
+        self.assertEqual(response.status_code, 403)
+        self.orden.refresh_from_db()
+        self.assertEqual(self.orden.estado, Orden.Estado.EN_ESPERA)
+
+    def test_la_orden_cancelada_sigue_en_el_historial_del_cliente(self):
+        self.cancelar()
+
+        response = self.client.get("/api/ordenes")
+
+        self.assertEqual([o["estado"] for o in response.json()], ["Cancelada"])
+        self.assertEqual(self.orden.historial.first().tipo_evento, Evento.CREACION)
+
+
+class CancelarOrdenConNovedadApiTests(OrdenEnProcesoMixin, APITestCase):
+    def decidir(self, decision):
+        self.client.force_authenticate(self.recepcionista)
+        return self.client.post(
+            f"/api/ordenes/{self.orden.pk}/decision",
+            {"decision": decision, "observacion": "Hable con Ana por telefono"},
+            format="json",
+        )
+
+    def cancelar(self, usuario=None):
+        self.client.force_authenticate(usuario or self.recepcionista)
+        return self.client.post(
+            f"/api/ordenes/{self.orden.pk}/cancelacion",
+            {"motivo": "El cliente no acepta la prenda manchada"},
+            format="json",
+        )
+
+    def test_se_cancela_la_orden_con_novedad_que_el_cliente_decidio_no_continuar(self):
+        self.client.force_authenticate(self.recepcionista)
+        self.client.post(
+            f"/api/ordenes/{self.orden.pk}/pagos", {"monto": "5000", "metodo": "efectivo"}, format="json"
+        )
+        self.registrar_novedad()
+        # "No continuar" ya no se ofrece, pero las ordenes que lo registraron antes siguen cancelables.
+        Novedad.objects.filter(orden=self.orden).update(decision=Novedad.Decision.NO_CONTINUAR)
+
+        for usuario in (self.recepcionista, self.admin):
+            with self.subTest(usuario=usuario.username):
+                Orden.objects.filter(pk=self.orden.pk).update(estado=Orden.Estado.CON_NOVEDAD)
+
+                response = self.cancelar(usuario)
+
+                self.assertEqual(response.status_code, 200, response.json())
+                self.assertEqual(response.json()["estado"], "Cancelada")
+                cancelacion = self.orden.historial.filter(tipo_evento=Evento.CANCELACION).last()
+                self.assertEqual(cancelacion.usuario, usuario)
+                self.assertEqual(
+                    cancelacion.detalle,
+                    "Con novedad → Cancelada. Motivo: El cliente no acepta la prenda manchada"
+                    ". Sale de la bandeja de op",
+                )
+                devolucion = self.orden.historial.filter(tipo_evento=Evento.DEVOLUCION).last()
+                self.assertRegex(devolucion.detalle, r"^\$5000(\.00)? devueltos al cliente\.")
+                Orden.objects.filter(pk=self.orden.pk).update(operario=self.operario)
+
+        self.client.force_authenticate(self.admin)
+        self.assertEqual(self.client.get("/api/ordenes/novedades").json(), [])
+
+    def test_rechaza_cancelar_la_orden_con_novedad_sin_decision(self):
+        self.registrar_novedad()
+
+        response = self.cancelar()
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("el servicio ya inicio", str(response.json()))
+        self.orden.refresh_from_db()
+        self.assertEqual(self.orden.estado, Orden.Estado.CON_NOVEDAD)
+        self.assertFalse(self.orden.historial.filter(tipo_evento=Evento.CANCELACION).exists())
+
+    def test_rechaza_cancelar_si_el_cliente_decidio_continuar(self):
+        self.registrar_novedad()
+        self.decidir(Novedad.Decision.CONTINUAR)
+
+        response = self.cancelar()
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("el servicio ya inicio", str(response.json()))
+
+        self.assertFalse(self.orden.historial.filter(tipo_evento=Evento.CANCELACION).exists())
+
+
+def hora(dia, hora_bogota):
+    """Momento del 2026-11-<dia> a la hora indicada de Bogota (UTC-5)."""
+    return datetime(2026, 11, dia, hora_bogota + 5, tzinfo=dt_timezone.utc)
+
+
+ETAPAS_PUBLICAS = [
+    "Recibida",
+    "Clasificada",
+    "En proceso",
+    "Control de calidad",
+    "Lista para entrega",
+    "Pagada",
+    "Entregada",
+]
+
+
+class ConsultaPublicaApiTests(CatalogoDePruebaMixin, APITestCase):
+    def setUp(self):
+        self.orden = crear_orden(codigo="SW-ABCD2345")
+
+    def consultar(self, codigo="SW-ABCD2345"):
+        return self.client.get(f"/api/ordenes/consulta/{codigo}")
+
+    def fijar(self, estado, fecha=date(2026, 11, 3)):
+        Orden.objects.filter(pk=self.orden.pk).update(estado=estado, fecha_estimada_entrega=fecha)
+
+    def test_sin_sesion_ve_el_estado_y_la_fecha_estimada(self):
+        self.fijar(Orden.Estado.RECIBIDA)
+
+        response = self.consultar()
+
+        self.assertEqual(response.status_code, 200)
+        datos = response.json()
+        # Recibida: la fecha la calcula la regla interna, no la guardada en la orden.
+        self.assertEqual(
+            (datos["codigo"], datos["estado"], datos["fecha_estimada_entrega"]),
+            ("SW-ABCD2345", "Recibida", sumar_dias_habiles(timezone.localdate(), 2).isoformat()),
+        )
+
+    def test_en_espera_se_muestra_sin_fecha_estimada(self):
+        datos = self.consultar().json()
+
+        self.assertEqual(datos["estado"], "En espera")
+        self.assertIsNone(datos["fecha_estimada_entrega"])
+
+    def test_la_orden_cancelada_se_muestra_como_cancelada(self):
+        self.fijar(Orden.Estado.CANCELADA)
+
+        self.assertEqual(self.consultar().json()["estado"], "Cancelada")
+
+    def test_un_codigo_inexistente_responde_404_con_mensaje(self):
+        response = self.consultar("SW-ZZZZ9999")
+
+        self.assertEqual(response.status_code, 404)
+        self.assertIn("No encontramos una orden con ese codigo", response.json()["detail"])
+
+    def test_no_expone_datos_del_cliente_ni_montos(self):
+        Orden.objects.filter(pk=self.orden.pk).update(valor_total=Decimal("16000"))
+
+        datos = self.consultar().json()
+
+        self.assertEqual(
+            set(datos),
+            {
+                "codigo",
+                "estado",
+                "fecha_estimada_entrega",
+                "etapa_actual",
+                "etapas",
+                "con_novedad",
+                "cancelada",
+                "fecha_cancelacion",
+                "eventos",
+            },
+        )
+        pago = next(e for e in datos["etapas"] if e["etapa"] == "Pagada")
+        self.assertEqual(set(pago), {"etapa", "fecha", "estado_pago", "abonado", "total"})
+        otras = [e for e in datos["etapas"] if e["etapa"] != "Pagada"]
+        self.assertEqual({tuple(e) for e in otras}, {("etapa", "fecha")})
+        sin_pago = {**datos, "etapas": otras}
+        self.assertNotIn("Ana Gomez", str(datos))
+        self.assertNotIn("16000", str(sin_pago))
+        self.assertNotIn(str(self.orden.pk), str(sin_pago).replace("SW-ABCD2345", ""))
+
+    # Orden recorrida por la API, con la hora de cada paso fija.
+    def en(self, momento, metodo, url, datos):
+        with mock.patch("django.utils.timezone.now", return_value=momento):
+            response = getattr(self.client, metodo)(url, datos, format="json")
+        self.assertIn(response.status_code, (200, 201), response.content[:300])
+        return response
+
+    def recorrer(self, *hasta):
+        self.cliente = self.orden.cliente
+        self.camisa = TipoPrenda.objects.create(nombre="Camisa")
+        facil = NivelDificultad.objects.create(nombre="Facil", factor=Decimal("1.00"))
+        self.algodon = Material.objects.create(nombre="Algodon", nivel_dificultad=facil)
+        self.planchado = Servicio.objects.create(nombre="Planchado")
+        self.lavado = Servicio.objects.create(nombre="Lavado")
+        self.tarifa(self.camisa, self.planchado, "6000")
+        self.tarifa(self.camisa, self.lavado, "4000")
+        self.operario = User.objects.create_user(username="op", password="x", rol=User.Rol.OPERARIO)
+        admin = User.objects.create_user(username="admin", password="x", rol=User.Rol.ADMINISTRADOR)
+        self.client.force_authenticate(admin)
+        orden = self.en(hora(10, 8), "post", "/api/ordenes", {
+            "cliente": self.cliente.pk,
+            "prendas": [{"tipo_prenda": self.camisa.pk, "material": self.algodon.pk, "cantidad": 1,
+                         "peso": "1", "servicios": [self.planchado.pk]}],
+        }).json()
+        self.url = f"/api/ordenes/{orden['id']}"
+        self.codigo = orden["codigo"]
+        pasos = {
+            "abono": (hora(10, 9), "post", "/pagos", {"monto": "1800", "metodo": "efectivo"}),
+            "clasificar": (hora(10, 10), "post", "/estado", {"estado": "Clasificada"}),
+            "asignar": (hora(10, 11), "post", "/asignacion", {"operario": self.operario.pk}),
+            "procesar": (hora(10, 12), "post", "/estado", {"estado": "En proceso"}),
+            "calidad": (hora(11, 9), "post", "/estado", {"estado": "Control de calidad"}),
+            "reprocesar": (hora(11, 10), "post", "/estado", {"estado": "En proceso"}),
+            "calidad2": (hora(11, 12), "post", "/estado", {"estado": "Control de calidad"}),
+            "lista": (hora(11, 15), "post", "/estado", {"estado": "Lista para entrega"}),
+            "saldo": (hora(11, 16), "post", "/pagos", {"monto": "4200", "metodo": "tarjeta"}),
+            "entregar": (hora(12, 17), "post", "/entrega", None),
+            "cancelar": (hora(10, 11), "post", "/cancelacion", {"motivo": "El cliente se retracto"}),
+        }
+        for paso in hasta:
+            momento, metodo, ruta, datos = pasos[paso]
+            if paso == "entregar":
+                prenda = self.client.get(self.url).json()["detalle_prendas"][0]["id"]
+                datos = {"prendas": [{"prenda": prenda, "resultado": "coincide"}]}
+            self.en(momento, metodo, self.url + ruta, datos)
+        self.client.force_authenticate(None)
+        return self.consultar(self.codigo).json()
+
+    def novedad_y_decision(self, decision, **extra):
+        prenda = Prenda.objects.get(orden__codigo=self.codigo)
+        self.client.force_authenticate(self.operario)
+        self.en(hora(11, 10), "post", self.url + "/novedades",
+                {"prenda": prenda.pk, "descripcion": "Mancha de tinta", "foto": data_url(JPEG)})
+        self.client.force_authenticate(User.objects.get(username="admin"))
+        if decision == "agregar_servicio":
+            extra["servicios"] = [{"prenda": prenda.pk, "servicio": self.lavado.pk}]
+        self.en(hora(11, 11), "post", self.url + "/decision",
+                {"decision": decision, "observacion": "Hable con Ana por telefono", **extra})
+        self.client.force_authenticate(None)
+        return self.consultar(self.codigo).json()
+
+    def etiquetas(self, datos):
+        return [e["etiqueta"] for e in datos["eventos"]]
+
+    def fechas(self, datos):
+        self.assertEqual([e["etapa"] for e in datos["etapas"]], ETAPAS_PUBLICAS)
+        return {e["etapa"]: e["fecha"] for e in datos["etapas"]}
+
+    def test_la_orden_recien_creada_no_tiene_etapas_cumplidas(self):
+        datos = self.recorrer()
+
+        self.assertEqual(datos["estado"], "En espera")
+        self.assertIsNone(datos["etapa_actual"])
+        self.assertEqual(set(self.fechas(datos).values()), {None})
+        self.assertEqual((datos["con_novedad"], datos["cancelada"], datos["fecha_cancelacion"]), (False, False, None))
+
+    def test_cada_etapa_lleva_la_fecha_y_hora_en_que_la_orden_entro_a_ella(self):
+        datos = self.recorrer("abono", "clasificar", "asignar", "procesar", "calidad")
+
+        self.assertEqual(datos["etapa_actual"], "Control de calidad")
+        self.assertEqual(
+            self.fechas(datos),
+            {
+                "Recibida": "2026-11-10T09:00:00-05:00",
+                "Clasificada": "2026-11-10T10:00:00-05:00",
+                "En proceso": "2026-11-10T12:00:00-05:00",
+                "Control de calidad": "2026-11-11T09:00:00-05:00",
+                "Lista para entrega": None,
+                "Pagada": "2026-11-10T09:00:00-05:00",
+                "Entregada": None,
+            },
+        )
+
+    def test_la_orden_pagada_y_entregada_completa_la_linea(self):
+        datos = self.recorrer(
+            "abono", "clasificar", "asignar", "procesar", "calidad", "lista", "saldo", "entregar"
+        )
+
+        fechas = self.fechas(datos)
+        self.assertEqual(datos["etapa_actual"], "Entregada")
+        self.assertNotIn(None, fechas.values())
+        self.assertEqual(fechas["Pagada"], "2026-11-11T16:00:00-05:00")
+        self.assertEqual(fechas["Entregada"], "2026-11-12T17:00:00-05:00")
+
+    def pago(self, datos):
+        return next(e for e in datos["etapas"] if e["etapa"] == "Pagada")
+
+    def test_sin_pagos_la_etapa_de_pago_queda_pendiente(self):
+        pago = self.pago(self.recorrer())
+
+        self.assertEqual(
+            (pago["estado_pago"], pago["fecha"], pago["abonado"], pago["total"]), ("pendiente", None, 0, 6000)
+        )
+
+    def test_un_abono_deja_el_pago_parcial_con_la_fecha_del_abono(self):
+        datos = self.recorrer("abono", "clasificar", "asignar", "procesar", "calidad", "lista")
+
+        self.assertEqual(
+            self.pago(datos),
+            {"etapa": "Pagada", "fecha": "2026-11-10T09:00:00-05:00", "estado_pago": "parcial",
+             "abonado": 1800, "total": 6000},
+        )
+        self.assertEqual(self.fechas(datos)["Lista para entrega"], "2026-11-11T15:00:00-05:00")
+
+    def test_varios_abonos_que_no_alcanzan_siguen_parciales_con_la_fecha_del_ultimo(self):
+        self.recorrer("abono")
+        self.client.force_authenticate(User.objects.get(username="admin"))
+        self.en(hora(10, 14), "post", self.url + "/pagos", {"monto": "1000", "metodo": "transferencia"})
+        self.client.force_authenticate(None)
+
+        pago = self.pago(self.consultar(self.codigo).json())
+
+        self.assertEqual(
+            (pago["estado_pago"], pago["abonado"], pago["fecha"]), ("parcial", 2800, "2026-11-10T14:00:00-05:00")
+        )
+
+    def test_un_pago_unico_completo(self):
+        self.recorrer()
+        self.client.force_authenticate(User.objects.get(username="admin"))
+        self.en(hora(10, 9), "post", self.url + "/pagos", {"monto": "6000", "metodo": "efectivo"})
+        self.client.force_authenticate(None)
+
+        pago = self.pago(self.consultar(self.codigo).json())
+
+        self.assertEqual(
+            (pago["estado_pago"], pago["abonado"], pago["total"], pago["fecha"]),
+            ("completo", 6000, 6000, "2026-11-10T09:00:00-05:00"),
+        )
+
+    def test_los_abonos_que_completan_el_total_toman_la_fecha_del_que_lo_completo(self):
+        pago = self.pago(self.recorrer("abono", "clasificar", "asignar", "procesar", "calidad", "lista", "saldo"))
+
+        self.assertEqual(
+            (pago["estado_pago"], pago["abonado"], pago["fecha"]), ("completo", 6000, "2026-11-11T16:00:00-05:00")
+        )
+
+    def test_el_total_es_lo_que_realmente_se_cobra_con_descuentos(self):
+        ReglaDescuento.objects.create(
+            nombre="10%", tipo="porcentaje", valor=Decimal("10"), vigente_desde=date(2020, 1, 1)
+        )
+        self.recorrer("abono")
+        self.client.force_authenticate(User.objects.get(username="admin"))
+        self.en(hora(10, 15), "post", self.url + "/pagos", {"monto": "3600", "metodo": "tarjeta"})
+        self.client.force_authenticate(None)
+
+        pago = self.pago(self.consultar(self.codigo).json())
+
+        self.assertEqual(
+            (pago["estado_pago"], pago["abonado"], pago["total"], pago["fecha"]),
+            ("completo", 5400, 5400, "2026-11-10T15:00:00-05:00"),
+        )
+
+    def test_la_etapa_de_pago_no_trae_metodos_ni_datos_internos(self):
+        self.recorrer("abono")
+        self.client.force_authenticate(User.objects.get(username="admin"))
+        self.en(hora(10, 14), "post", self.url + "/pagos", {"monto": "1000", "metodo": "transferencia"})
+        self.client.force_authenticate(None)
+        texto = str(self.consultar(self.codigo).json()).lower()
+
+        for interno in ("metodo", "efectivo", "transferencia", "usuario", "admin", "referencia", "nota", "'id'"):
+            with self.subTest(interno=interno):
+                self.assertNotIn(interno, texto)
+
+    def test_con_reproceso_se_muestra_la_ultima_entrada_y_lo_posterior_vuelve_a_pendiente(self):
+        datos = self.recorrer("abono", "clasificar", "asignar", "procesar", "calidad", "reprocesar")
+
+        fechas = self.fechas(datos)
+        self.assertEqual(datos["etapa_actual"], "En proceso")
+        self.assertEqual(fechas["En proceso"], "2026-11-11T10:00:00-05:00")
+        self.assertIsNone(fechas["Control de calidad"])
+        self.assertEqual(fechas["Clasificada"], "2026-11-10T10:00:00-05:00")
+        self.assertEqual(
+            self.etiquetas(datos),
+            ["Orden recibida", "Prendas clasificadas", "En proceso", "En control de calidad", "Volvio a proceso"],
+        )
+        self.assertEqual(datos["eventos"][-1]["fecha"], "2026-11-11T10:00:00-05:00")
+
+    def test_la_orden_entregada_tras_un_reproceso_completa_la_linea_con_las_ultimas_fechas(self):
+        datos = self.recorrer(
+            "abono", "clasificar", "asignar", "procesar", "calidad", "reprocesar", "calidad2",
+            "lista", "saldo", "entregar",
+        )
+
+        fechas = self.fechas(datos)
+        self.assertNotIn(None, fechas.values())
+        self.assertEqual(fechas["En proceso"], "2026-11-11T10:00:00-05:00")
+        self.assertEqual(fechas["Control de calidad"], "2026-11-11T12:00:00-05:00")
+        self.assertIn("Volvio a proceso", self.etiquetas(datos))
+        self.assertEqual(self.etiquetas(datos)[-1], "Entregada")
+
+    def test_reprocesar_desde_la_entrega_deja_pendiente_lo_posterior_a_en_proceso(self):
+        self.recorrer("abono", "clasificar", "asignar", "procesar", "calidad", "lista", "saldo")
+        self.client.force_authenticate(User.objects.get(username="admin"))
+        prenda = Prenda.objects.get(orden__codigo=self.codigo)
+        self.en(hora(12, 9), "post", self.url + "/entrega", {"prendas": [
+            {"prenda": prenda.pk, "resultado": "novedad", "observacion": "Boton suelto", "foto": data_url(JPEG)},
+        ]})
+        self.en(hora(12, 10), "post", self.url + "/decision", {
+            "decision": "reprocesar_con_descuento", "observacion": "Ana pide rehacerla", "operario": self.operario.pk,
+        })
+        self.client.force_authenticate(None)
+
+        datos = self.consultar(self.codigo).json()
+
+        fechas = self.fechas(datos)
+        self.assertEqual(datos["etapa_actual"], "En proceso")
+        self.assertEqual(fechas["En proceso"], "2026-11-12T10:00:00-05:00")
+        for etapa in ("Control de calidad", "Lista para entrega", "Entregada"):
+            self.assertIsNone(fechas[etapa], etapa)
+        self.assertEqual(self.etiquetas(datos)[-2:], ["Novedad en una prenda", "Volvio a proceso"])
+
+    def test_la_novedad_con_decision_continuar_devuelve_la_orden_a_su_etapa(self):
+        self.recorrer("abono", "clasificar", "asignar", "procesar", "calidad")
+
+        datos = self.novedad_y_decision("continuar")
+
+        fechas = self.fechas(datos)
+        self.assertEqual((datos["estado"], datos["con_novedad"]), ("Control de calidad", False))
+        self.assertEqual(datos["etapa_actual"], "Control de calidad")
+        self.assertEqual(fechas["Control de calidad"], "2026-11-11T11:00:00-05:00")
+        self.assertEqual(self.etiquetas(datos)[-2:], ["Novedad en una prenda", "En control de calidad"])
+
+    def test_la_novedad_con_agregar_servicio_vuelve_a_proceso_y_deja_pendiente_lo_posterior(self):
+        self.recorrer("abono", "clasificar", "asignar", "procesar", "calidad")
+
+        datos = self.novedad_y_decision("agregar_servicio")
+
+        fechas = self.fechas(datos)
+        self.assertEqual(datos["etapa_actual"], "En proceso")
+        self.assertEqual(fechas["En proceso"], "2026-11-11T11:00:00-05:00")
+        self.assertIsNone(fechas["Control de calidad"])
+        # El servicio agregado sube el total: lo abonado queda como pago parcial.
+        self.assertEqual(self.pago(datos)["estado_pago"], "parcial")
+        self.assertEqual(self.etiquetas(datos)[-2:], ["Novedad en una prenda", "Volvio a proceso"])
+
+    def test_la_orden_cancelada_marca_la_cancelacion_y_conserva_lo_cumplido(self):
+        datos = self.recorrer("abono", "cancelar")
+
+        fechas = self.fechas(datos)
+        self.assertEqual((datos["estado"], datos["cancelada"]), ("Cancelada", True))
+        self.assertEqual(datos["fecha_cancelacion"], "2026-11-10T11:00:00-05:00")
+        self.assertEqual(datos["etapa_actual"], "Recibida")
+        self.assertEqual(fechas["Recibida"], "2026-11-10T09:00:00-05:00")
+        self.assertIsNone(fechas["Clasificada"])
+
+    def test_la_orden_con_novedad_mantiene_la_etapa_en_que_estaba(self):
+        self.recorrer("abono", "clasificar", "asignar", "procesar")
+        self.client.force_authenticate(self.operario)
+        prenda = Prenda.objects.get(orden__codigo=self.codigo)
+        self.en(hora(11, 8), "post", self.url + "/novedades",
+                {"prenda": prenda.pk, "descripcion": "Mancha", "foto": data_url(JPEG)})
+        self.client.force_authenticate(None)
+
+        datos = self.consultar(self.codigo).json()
+
+        self.assertEqual((datos["estado"], datos["con_novedad"]), ("Con novedad", True))
+        self.assertEqual(datos["etapa_actual"], "En proceso")
+        self.assertEqual(self.fechas(datos)["En proceso"], "2026-11-10T12:00:00-05:00")
+
+    def test_la_respuesta_publica_no_trae_usuarios_montos_ni_ids(self):
+        datos = self.recorrer("abono", "clasificar", "asignar", "procesar")
+        texto = str(datos)
+
+        # Los montos solo van en la etapa de pago (estado_pago, abonado, total).
+        sin_pago = str({**datos, "etapas": [e for e in datos["etapas"] if e["etapa"] != "Pagada"]})
+        for interno in ("Ana Gomez", "admin", "op", "recepcion", "1800", "6000", "efectivo"):
+            with self.subTest(interno=interno):
+                self.assertNotIn(interno, sin_pago.replace("En proceso", "").replace(self.codigo, ""))
+        self.assertNotIn("efectivo", texto)
+
+    def test_la_respuesta_publica_no_trae_observaciones_ni_motivos(self):
+        self.recorrer("abono", "clasificar", "asignar", "procesar")
+        texto = str(self.novedad_y_decision("agregar_servicio"))
+
+        for interno in ("Mancha", "Hable con Ana", "Lavado", "4000", "Servicios agregados"):
+            with self.subTest(interno=interno):
+                self.assertNotIn(interno, texto)
+
+    def test_la_cancelacion_no_muestra_el_motivo(self):
+        texto = str(self.recorrer("abono", "cancelar"))
+
+        self.assertNotIn("retracto", texto)
+
+    def test_cualquier_rol_puede_consultar(self):
+        for rol in User.Rol.values:
+            with self.subTest(rol=rol):
+                self.client.force_authenticate(
+                    User.objects.create_user(username=f"u-{rol}", password="x", rol=rol)
+                )
+                self.assertEqual(self.consultar().status_code, 200)
+
+
+class EntregaEnMostradorMixin(OrdenEnProcesoMixin):
+    """Dos camisas de planchado de 6000 cada una, listas para entregar."""
+
+    def lista_para_entregar(self, pago="12000"):
+        self.client.force_authenticate(self.recepcionista)
+        self.client.post(
+            f"/api/ordenes/{self.orden.pk}/pagos", {"monto": pago, "metodo": "efectivo"}, format="json"
+        )
+        Orden.objects.filter(pk=self.orden.pk).update(estado=Orden.Estado.LISTA)
+
+    def entregar(self, *verificaciones):
+        self.client.force_authenticate(self.recepcionista)
+        return self.client.post(
+            f"/api/ordenes/{self.orden.pk}/entrega", {"prendas": list(verificaciones)}, format="json"
+        )
+
+    def coincide(self, prenda):
+        return {"prenda": prenda.pk, "resultado": "coincide"}
+
+    def novedad(self, prenda, **extra):
+        return {
+            "prenda": prenda.pk,
+            "resultado": "novedad",
+            "observacion": "Costura desviada en el puno",
+            "foto": data_url(JPEG),
+            **extra,
+        }
+
+    def dano(self, prenda, **extra):
+        return {
+            "prenda": prenda.pk,
+            "resultado": "dano",
+            "observacion": "Quemada con la plancha",
+            "foto": data_url(JPEG),
+            "valor_unitario_declarado": "120000",
+            **extra,
+        }
+
+    def perdida(self, prenda, **extra):
+        return {
+            "prenda": prenda.pk,
+            "resultado": "perdida",
+            "observacion": "No aparece en la bodega",
+            "valor_unitario_declarado": "80000",
+            **extra,
+        }
+
+    def decidir(self, decision, usuario=None, **extra):
+        self.client.force_authenticate(usuario or self.recepcionista)
+        return self.client.post(
+            f"/api/ordenes/{self.orden.pk}/decision",
+            {"decision": decision, "observacion": "Ana esta en el mostrador", **extra},
+            format="json",
+        )
+
+    def de_nuevo_lista(self):
+        Orden.objects.filter(pk=self.orden.pk).update(estado=Orden.Estado.LISTA)
+
+    def eventos(self, tipo):
+        return self.orden.historial.filter(tipo_evento=tipo)
+
+
+class EntregaConDanoOPerdidaTests(EntregaEnMostradorMixin, APITestCase):
+    def setUp(self):
+        super().setUp()
+        self.lista_para_entregar()
+
+    def test_el_dano_descuenta_el_servicio_de_la_prenda_y_se_entrega_el_resto(self):
+        response = self.entregar(self.dano(self.camisa_1), self.coincide(self.camisa_2))
+
+        self.assertEqual(response.status_code, 200, response.json())
+        self.orden.refresh_from_db()
+        self.assertEqual(
+            (self.orden.estado, self.orden.descuento_dano, self.orden.valor_total),
+            (Orden.Estado.ENTREGADA, Decimal("6000"), Decimal("6000")),
+        )
+        dano = DanoPrenda.objects.get()
+        self.assertEqual(
+            (dano.prenda, dano.tipo, dano.valor_declarado, dano.valor_servicio, dano.estado),
+            (self.camisa_1, DanoPrenda.Tipo.DANO, Decimal("120000"), Decimal("6000"), "pendiente"),
+        )
+        self.assertEqual((dano.operario, dano.creado_por), (self.operario, self.recepcionista))
+        self.assertEqual(dano.foto.tipo, "image/jpeg")
+        registro = self.eventos(Evento.DANO_PRENDA).get()
+        self.assertIn("Daño de 1 de 1 x Camisa · Algodon: Quemada con la plancha", registro.detalle)
+        self.assertIn(
+            "valor declarado $120000.00 por unidad, $120000.00 a pagar al cliente. Operario: op",
+            registro.detalle,
+        )
+        self.assertIn("2 prendas verificadas, 1 con daño o pérdida", self.eventos(Evento.ENTREGA).get().detalle)
+        self.assertIn("$6000.00 devueltos al cliente", self.eventos(Evento.DEVOLUCION).get().detalle)
+        self.assertEqual(self.orden.total_pagado(), Decimal("12000"))
+
+    def tres_unidades_en_la_camisa_1(self, precio_unitario="6000"):
+        """La camisa_1 pasa a ser una linea de 3 unidades y se paga la diferencia."""
+        Prenda.objects.filter(pk=self.camisa_1.pk).update(cantidad=3)
+        self.camisa_1.servicios.update(valor_aplicado=Decimal(precio_unitario) * 3)
+        self.orden.refresh_from_db()
+        self.orden.recalcular()
+        self.orden.save()
+        self.client.post(
+            f"/api/ordenes/{self.orden.pk}/pagos",
+            {"monto": str(self.orden.valor_total - Decimal("12000")), "metodo": "efectivo"},
+            format="json",
+        )
+
+    def test_la_perdida_de_una_unidad_solo_deja_de_cobrar_esa_unidad(self):
+        self.tres_unidades_en_la_camisa_1(precio_unitario="18000")
+
+        response = self.entregar(
+            self.perdida(self.camisa_1, cantidad_afectada=1, valor_unitario_declarado="25000"),
+            self.coincide(self.camisa_2),
+        )
+
+        self.assertEqual(response.status_code, 200, response.json())
+        self.orden.refresh_from_db()
+        self.assertEqual(
+            (self.orden.estado, self.orden.descuento_dano, self.orden.valor_total),
+            (Orden.Estado.ENTREGADA, Decimal("18000"), Decimal("42000")),
+        )
+        dano = DanoPrenda.objects.get()
+        self.assertEqual(
+            (dano.cantidad_afectada, dano.valor_servicio, dano.valor_unitario_declarado, dano.valor_declarado),
+            (1, Decimal("18000"), Decimal("25000"), Decimal("25000")),
+        )
+        self.assertIn("Pérdida de 1 de 3 x Camisa · Algodon", self.eventos(Evento.DANO_PRENDA).get().detalle)
+        self.assertIn("$18000.00 devueltos al cliente", self.eventos(Evento.DEVOLUCION).get().detalle)
+        self.cliente.refresh_from_db()
+        self.assertEqual(self.cliente.puntos, 42)
+        prenda = next(p for p in response.json()["detalle_prendas"] if p["id"] == self.camisa_1.pk)
+        self.assertEqual(
+            (
+                prenda["dano"],
+                prenda["dano_cantidad"],
+                prenda["dano_valor_unitario_declarado"],
+                prenda["dano_valor_declarado"],
+            ),
+            ("perdida", 1, "25000.00", "25000.00"),
+        )
+
+    def test_sin_cantidad_afectada_se_toma_la_linea_completa_y_se_debe_el_valor_de_cada_unidad(self):
+        self.tres_unidades_en_la_camisa_1()
+
+        response = self.entregar(self.perdida(self.camisa_1), self.coincide(self.camisa_2))
+
+        self.assertEqual(response.status_code, 200, response.json())
+        dano = DanoPrenda.objects.get()
+        self.assertEqual(
+            (dano.cantidad_afectada, dano.valor_servicio, dano.valor_declarado),
+            (3, Decimal("18000"), Decimal("240000")),
+        )
+
+    def test_el_total_que_se_le_debe_al_cliente_lo_calcula_el_backend(self):
+        self.tres_unidades_en_la_camisa_1()
+
+        response = self.entregar(
+            self.perdida(
+                self.camisa_1, cantidad_afectada=2, valor_unitario_declarado="25000", valor_declarado="999999"
+            ),
+            self.coincide(self.camisa_2),
+        )
+
+        self.assertEqual(response.status_code, 200, response.json())
+        self.assertEqual(DanoPrenda.objects.get().valor_declarado, Decimal("50000"))
+
+    def test_la_cantidad_afectada_no_supera_la_de_la_linea(self):
+        self.tres_unidades_en_la_camisa_1()
+
+        for cantidad in (0, 4):
+            with self.subTest(cantidad=cantidad):
+                response = self.entregar(
+                    self.perdida(self.camisa_1, cantidad_afectada=cantidad), self.coincide(self.camisa_2)
+                )
+
+                self.assertEqual(response.status_code, 400)
+                self.assertIn("cantidad_afectada", str(response.json()))
+        self.assertFalse(DanoPrenda.objects.exists())
+        self.orden.refresh_from_db()
+        self.assertEqual(self.orden.estado, Orden.Estado.LISTA)
+
+    def test_el_dano_exige_observacion_foto_y_valor(self):
+        for campo, incompleto in (
+            ("observacion", {"observacion": "  "}),
+            ("foto", {"foto": None}),
+            ("valor_unitario_declarado", {"valor_unitario_declarado": None}),
+            ("valor_unitario_declarado", {"valor_unitario_declarado": "0"}),
+            ("valor_unitario_declarado", {"valor_unitario_declarado": "-5000"}),
+        ):
+            with self.subTest(incompleto=incompleto):
+                response = self.entregar(
+                    self.dano(self.camisa_1, **incompleto), self.coincide(self.camisa_2)
+                )
+
+                self.assertEqual(response.status_code, 400)
+                self.assertIn(campo, str(response.json()))
+        self.assertFalse(DanoPrenda.objects.exists())
+        self.orden.refresh_from_db()
+        self.assertEqual(self.orden.estado, Orden.Estado.LISTA)
+
+    def test_la_perdida_exige_descripcion_y_valor_y_no_lleva_foto(self):
+        for incompleta in ({"observacion": ""}, {"valor_unitario_declarado": None}, {"foto": data_url(JPEG)}):
+            with self.subTest(incompleta=incompleta):
+                response = self.entregar(
+                    self.perdida(self.camisa_1, **incompleta), self.coincide(self.camisa_2)
+                )
+
+                self.assertEqual(response.status_code, 400)
+        self.assertFalse(DanoPrenda.objects.exists())
+
+        response = self.entregar(self.perdida(self.camisa_1), self.coincide(self.camisa_2))
+
+        self.assertEqual(response.status_code, 200, response.json())
+        perdida = DanoPrenda.objects.get()
+        self.assertEqual((perdida.tipo, perdida.valor_declarado), ("perdida", Decimal("80000")))
+        self.assertFalse(hasattr(perdida, "foto"))
+        self.assertIn("Pérdida de 1 de 1 x Camisa", self.eventos(Evento.DANO_PRENDA).get().detalle)
+
+    def test_el_detalle_de_la_orden_marca_la_prenda_danada(self):
+        self.entregar(self.dano(self.camisa_1), self.coincide(self.camisa_2))
+
+        orden = self.client.get(f"/api/ordenes/{self.orden.pk}").json()
+
+        self.assertEqual([p["dano"] for p in orden["detalle_prendas"]], ["dano", None])
+        self.assertEqual((orden["descuento_dano"], orden["valor_total"]), ("6000.00", "6000.00"))
+
+    def test_un_dano_junto_a_una_novedad_deja_la_prenda_danada_fuera_del_reproceso(self):
+        response = self.entregar(self.dano(self.camisa_1), self.novedad(self.camisa_2))
+
+        self.assertEqual(response.status_code, 200, response.json())
+        self.orden.refresh_from_db()
+        self.assertEqual(self.orden.estado, Orden.Estado.CON_NOVEDAD)
+        self.assertEqual(DanoPrenda.objects.get().prenda, self.camisa_1)
+
+        self.decidir(Novedad.Decision.REPROCESAR_CON_DESCUENTO)
+
+        self.client.force_authenticate(self.operario)
+        bandeja = self.client.get("/api/ordenes/bandeja").json()
+        self.assertEqual([p["id"] for p in bandeja[0]["prendas"]], [self.camisa_2.pk])
+
+        self.de_nuevo_lista()
+        con_la_danada = self.entregar(self.coincide(self.camisa_1), self.coincide(self.camisa_2))
+        self.assertEqual(con_la_danada.status_code, 400)
+
+        response = self.entregar(self.coincide(self.camisa_2))
+
+        self.assertEqual(response.status_code, 200, response.json())
+        self.orden.refresh_from_db()
+        # 12000 - 6000 del servicio danado - 2000 de descuento por reproceso.
+        self.assertEqual((self.orden.estado, self.orden.valor_total), (Orden.Estado.ENTREGADA, Decimal("4000")))
+        self.assertIn("$8000.00 devueltos al cliente", self.eventos(Evento.DEVOLUCION).get().detalle)
+
+    def test_el_operario_no_registra_danos(self):
+        self.client.force_authenticate(self.operario)
+
+        response = self.client.post(
+            f"/api/ordenes/{self.orden.pk}/entrega",
+            {"prendas": [self.dano(self.camisa_1), self.coincide(self.camisa_2)]},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 403)
+
+
+class EntregaConDanoYPagoIncompletoTests(EntregaEnMostradorMixin, APITestCase):
+    def test_si_el_pago_no_cubre_el_nuevo_total_no_se_registra_nada(self):
+        self.lista_para_entregar(pago="4000")
+
+        response = self.entregar(self.dano(self.camisa_1), self.coincide(self.camisa_2))
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("saldo pendiente $2000.00", str(response.json()))
+        self.orden.refresh_from_db()
+        self.assertEqual((self.orden.estado, self.orden.descuento_dano), (Orden.Estado.LISTA, 0))
+        self.assertFalse(DanoPrenda.objects.exists())
+
+
+class DecisionConDescuentoTests(EntregaEnMostradorMixin, APITestCase):
+    def con_novedad_en_la_entrega(self, pago="12000"):
+        self.lista_para_entregar(pago)
+        self.entregar(self.novedad(self.camisa_1), self.coincide(self.camisa_2))
+        return Novedad.objects.filter(prenda=self.camisa_1).last()
+
+    def test_entregar_con_descuento_aplica_el_porcentaje_de_la_gravedad_y_entrega(self):
+        novedad = self.con_novedad_en_la_entrega()
+
+        response = self.decidir(
+            Novedad.Decision.ENTREGAR_CON_DESCUENTO,
+            gravedades=[{"novedad": novedad.pk, "gravedad": "moderada"}],
+        )
+
+        self.assertEqual(response.status_code, 200, response.json())
+        novedad.refresh_from_db()
+        self.assertEqual(
+            (novedad.decision, novedad.gravedad, novedad.porcentaje_descuento, novedad.monto_descuento),
+            (Novedad.Decision.ENTREGAR_CON_DESCUENTO, "moderada", Decimal("35"), Decimal("2100")),
+        )
+        self.orden.refresh_from_db()
+        self.assertEqual(
+            (self.orden.estado, self.orden.descuento_novedad, self.orden.valor_total),
+            (Orden.Estado.ENTREGADA, Decimal("2100"), Decimal("9900")),
+        )
+        decision = self.eventos(Evento.DECISION_NOVEDAD).get()
+        self.assertEqual(decision.usuario, self.recepcionista)
+        self.assertIn("1 x Camisa · Algodon: moderada 35 % → $2100.00", decision.detalle)
+        self.assertIn("Nuevo total $9900.00", decision.detalle)
+        self.assertIn("Con novedad → Entregada", self.eventos(Evento.ENTREGA).get().detalle)
+        self.assertIn("$2100.00 devueltos al cliente", self.eventos(Evento.DEVOLUCION).get().detalle)
+
+    def test_si_el_porcentaje_da_menos_del_minimo_se_aplica_el_minimo(self):
+        novedad = self.con_novedad_en_la_entrega()
+
+        self.decidir(
+            Novedad.Decision.ENTREGAR_CON_DESCUENTO,
+            gravedades=[{"novedad": novedad.pk, "gravedad": "leve"}],
+        )
+
+        # 15 % de 6000 son 900; el minimo por prenda es 2000.
+        novedad.refresh_from_db()
+        self.assertEqual(novedad.monto_descuento, Decimal("2000"))
+
+    def test_lo_descontado_a_una_prenda_no_pasa_del_tope(self):
+        primera = self.con_novedad_en_la_entrega()
+        self.decidir(Novedad.Decision.REPROCESAR_CON_DESCUENTO)
+        self.de_nuevo_lista()
+        self.entregar(self.novedad(self.camisa_1), self.coincide(self.camisa_2))
+        segunda = Novedad.objects.filter(prenda=self.camisa_1).last()
+
+        self.decidir(
+            Novedad.Decision.ENTREGAR_CON_DESCUENTO,
+            gravedades=[{"novedad": segunda.pk, "gravedad": "notoria"}],
+        )
+
+        primera.refresh_from_db()
+        segunda.refresh_from_db()
+        # Tope: 50 % de 6000 = 3000; ya llevaba 2000 del reproceso.
+        self.assertEqual((primera.monto_descuento, segunda.monto_descuento), (Decimal("2000"), Decimal("1000")))
+        self.orden.refresh_from_db()
+        self.assertEqual((self.orden.estado, self.orden.valor_total), (Orden.Estado.ENTREGADA, Decimal("9000")))
+
+    def test_hay_que_indicar_la_gravedad_de_cada_prenda_con_novedad(self):
+        novedad = self.con_novedad_en_la_entrega()
+
+        for gravedades in ([], [{"novedad": 999, "gravedad": "leve"}]):
+            with self.subTest(gravedades=gravedades):
+                response = self.decidir(Novedad.Decision.ENTREGAR_CON_DESCUENTO, gravedades=gravedades)
+
+                self.assertEqual(response.status_code, 400)
+                self.assertIn("gravedad de cada prenda", str(response.json()))
+        novedad.refresh_from_db()
+        self.assertIsNone(novedad.decision)
+        self.orden.refresh_from_db()
+        self.assertEqual(self.orden.estado, Orden.Estado.CON_NOVEDAD)
+
+    def test_entregar_con_descuento_exige_que_el_pago_cubra_el_nuevo_total(self):
+        novedad = self.con_novedad_en_la_entrega(pago="5000")
+
+        response = self.decidir(
+            Novedad.Decision.ENTREGAR_CON_DESCUENTO,
+            gravedades=[{"novedad": novedad.pk, "gravedad": "leve"}],
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("saldo pendiente $5000.00", str(response.json()))
+        novedad.refresh_from_db()
+        self.assertEqual((novedad.decision, novedad.monto_descuento), (None, 0))
+        self.orden.refresh_from_db()
+        self.assertEqual((self.orden.estado, self.orden.valor_total), (Orden.Estado.CON_NOVEDAD, Decimal("12000")))
+
+    def test_reprocesar_con_descuento_vuelve_al_mismo_operario_y_deja_saldo_a_favor(self):
+        novedad = self.con_novedad_en_la_entrega()
+
+        response = self.decidir(Novedad.Decision.REPROCESAR_CON_DESCUENTO)
+
+        self.assertEqual(response.status_code, 200, response.json())
+        self.assertEqual(response.json()["saldo_a_favor"], "2000.00")
+        novedad.refresh_from_db()
+        self.assertEqual((novedad.porcentaje_descuento, novedad.monto_descuento), (Decimal("20"), Decimal("2000")))
+        self.orden.refresh_from_db()
+        self.assertEqual(
+            (self.orden.estado, self.orden.operario, self.orden.numero_reprocesos, self.orden.valor_total),
+            (Orden.Estado.EN_PROCESO, self.operario, 1, Decimal("10000")),
+        )
+        self.assertIn("Con novedad → En proceso", self.eventos(Evento.DECISION_NOVEDAD).get().detalle)
+        self.assertFalse(self.eventos(Evento.REASIGNACION).exists())
+        self.assertFalse(self.eventos(Evento.DEVOLUCION).exists())
+
+        self.de_nuevo_lista()
+        entrega = self.entregar(self.coincide(self.camisa_1), self.coincide(self.camisa_2))
+
+        self.assertEqual(entrega.status_code, 200, entrega.json())
+        self.assertEqual(entrega.json()["saldo_a_favor"], "0.00")
+        self.assertIn("$2000.00 devueltos al cliente", self.eventos(Evento.DEVOLUCION).get().detalle)
+
+    def test_reprocesar_con_otro_operario_queda_como_reasignacion(self):
+        self.con_novedad_en_la_entrega()
+
+        response = self.decidir(
+            Novedad.Decision.REPROCESAR_CON_DESCUENTO, operario=self.otro_operario.pk
+        )
+
+        self.assertEqual(response.status_code, 200, response.json())
+        self.orden.refresh_from_db()
+        self.assertEqual(self.orden.operario, self.otro_operario)
+        self.assertEqual(
+            self.eventos(Evento.REASIGNACION).get().detalle,
+            "op → op2 (reproceso por novedad de la entrega)",
+        )
+
+    def test_si_el_operario_no_esta_activo_hay_que_elegir_otro(self):
+        self.con_novedad_en_la_entrega()
+        User.objects.filter(pk=self.operario.pk).update(is_active=False)
+
+        sin_elegir = self.decidir(Novedad.Decision.REPROCESAR_CON_DESCUENTO)
+        al_inactivo = self.decidir(Novedad.Decision.REPROCESAR_CON_DESCUENTO, operario=self.operario.pk)
+
+        self.assertEqual(sin_elegir.status_code, 400)
+        self.assertIn("selecciona otro", str(sin_elegir.json()))
+        self.assertEqual(al_inactivo.status_code, 400)
+        response = self.decidir(
+            Novedad.Decision.REPROCESAR_CON_DESCUENTO, operario=self.otro_operario.pk
+        )
+        self.assertEqual(response.status_code, 200, response.json())
+
+    def test_la_novedad_de_la_entrega_no_admite_continuar_ni_no_continuar(self):
+        self.con_novedad_en_la_entrega()
+
+        for decision in (
+            Novedad.Decision.CONTINUAR,
+            Novedad.Decision.NO_CONTINUAR,
+            Novedad.Decision.REPROCESAR,
+        ):
+            with self.subTest(decision=decision):
+                response = self.decidir(decision)
+
+                self.assertEqual(response.status_code, 400)
+                self.assertIn('"Entregar con descuento", "Reprocesar con descuento"', str(response.json()))
+        self.orden.refresh_from_db()
+        self.assertEqual(self.orden.estado, Orden.Estado.CON_NOVEDAD)
+
+    def test_la_novedad_del_proceso_no_admite_las_decisiones_con_descuento(self):
+        self.registrar_novedad()
+
+        for decision in (
+            Novedad.Decision.ENTREGAR_CON_DESCUENTO,
+            Novedad.Decision.REPROCESAR_CON_DESCUENTO,
+        ):
+            with self.subTest(decision=decision):
+                self.assertEqual(self.decidir(decision).status_code, 400)
+
+    def test_cambiar_la_configuracion_no_altera_lo_ya_descontado(self):
+        novedad = self.con_novedad_en_la_entrega()
+        self.decidir(Novedad.Decision.REPROCESAR_CON_DESCUENTO)
+
+        ConfiguracionDescuentoNovedad.objects.filter(pk=1).update(
+            porcentaje_reproceso=Decimal("40"), monto_minimo=Decimal("0")
+        )
+        self.de_nuevo_lista()
+        self.entregar(self.coincide(self.camisa_1), self.coincide(self.camisa_2))
+
+        novedad.refresh_from_db()
+        self.assertEqual((novedad.porcentaje_descuento, novedad.monto_descuento), (Decimal("20"), Decimal("2000")))
+
+
+class ConfiguracionDescuentosNovedadTests(APITestCase):
+    url = "/api/ordenes/descuentos-novedad"
+
+    def setUp(self):
+        self.admin = User.objects.create_user(username="jefe", password="x", rol=User.Rol.ADMINISTRADOR)
+        self.recepcionista = User.objects.create_user(
+            username="recepcion", password="x", rol=User.Rol.RECEPCIONISTA
+        )
+
+    def test_arranca_con_los_valores_acordados(self):
+        self.client.force_authenticate(self.recepcionista)
+
+        datos = self.client.get(self.url).json()
+
+        self.assertEqual(
+            {k: v for k, v in datos.items() if k != "actualizado_en"},
+            {
+                "porcentaje_leve": "15.00",
+                "porcentaje_moderada": "35.00",
+                "porcentaje_notoria": "50.00",
+                "porcentaje_reproceso": "20.00",
+                "monto_minimo": "2000.00",
+                "tope_porcentaje": "50.00",
+            },
+        )
+
+    def test_el_administrador_la_cambia_y_queda_registrado(self):
+        self.client.force_authenticate(self.admin)
+
+        response = self.client.patch(
+            self.url, {"porcentaje_leve": "10", "monto_minimo": "3000"}, format="json"
+        )
+
+        self.assertEqual(response.status_code, 200, response.json())
+        self.assertEqual(ConfiguracionDescuentoNovedad.actual().porcentaje_leve, Decimal("10"))
+        cambio = CambioConfiguracionDescuento.objects.get()
+        self.assertEqual(cambio.usuario, self.admin)
+        self.assertEqual(cambio.detalle, "Leve: 15 % → 10 %; Monto minimo: 2000 → 3000")
+        cambios = self.client.get(f"{self.url}/cambios").json()
+        self.assertEqual([c["detalle"] for c in cambios], [cambio.detalle])
+
+    def test_sin_cambios_reales_no_registra_nada(self):
+        self.client.force_authenticate(self.admin)
+
+        self.client.patch(self.url, {"porcentaje_leve": "15"}, format="json")
+
+        self.assertFalse(CambioConfiguracionDescuento.objects.exists())
+
+    def test_solo_el_administrador_la_cambia(self):
+        operario = User.objects.create_user(username="op", password="x", rol=User.Rol.OPERARIO)
+        for usuario in (self.recepcionista, operario):
+            with self.subTest(usuario=usuario.username):
+                self.client.force_authenticate(usuario)
+
+                self.assertEqual(
+                    self.client.patch(self.url, {"porcentaje_leve": "1"}, format="json").status_code, 403
+                )
+                self.assertEqual(self.client.get(f"{self.url}/cambios").status_code, 403)
+        self.assertEqual(ConfiguracionDescuentoNovedad.actual().porcentaje_leve, Decimal("15"))
+
+    def test_rechaza_porcentajes_fuera_de_rango_o_desordenados(self):
+        self.client.force_authenticate(self.admin)
+
+        for datos in ({"porcentaje_leve": "-1"}, {"tope_porcentaje": "101"}, {"porcentaje_moderada": "60"}):
+            with self.subTest(datos=datos):
+                self.assertEqual(self.client.patch(self.url, datos, format="json").status_code, 400)
+        self.assertFalse(CambioConfiguracionDescuento.objects.exists())
+
+
+class DanosApiTests(EntregaEnMostradorMixin, APITestCase):
+    url_danos = "/api/danos"
+
+    def setUp(self):
+        super().setUp()
+        self.lista_para_entregar()
+        self.entregar(self.dano(self.camisa_1), self.coincide(self.camisa_2))
+        self.dano_registrado = DanoPrenda.objects.get()
+
+    def pagar_dano(self, usuario, observacion="Transferencia a Ana"):
+        self.client.force_authenticate(usuario)
+        return self.client.post(
+            f"{self.url_danos}/{self.dano_registrado.pk}/pago", {"observacion": observacion}, format="json"
+        )
+
+    def test_el_administrador_y_la_recepcionista_ven_los_casos(self):
+        for usuario in (self.admin, self.recepcionista):
+            with self.subTest(usuario=usuario.username):
+                self.client.force_authenticate(usuario)
+
+                casos = self.client.get(self.url_danos).json()
+
+                self.assertEqual(len(casos), 1)
+                caso = casos[0]
+                self.assertEqual(
+                    (caso["orden_codigo"], caso["cliente_nombre"], caso["tipo_nombre"], caso["estado_nombre"]),
+                    (self.orden.codigo, "Ana Gomez", "Daño", "Pendiente de pago"),
+                )
+                self.assertEqual(
+                    (
+                        caso["valor_unitario_declarado"],
+                        caso["valor_declarado"],
+                        caso["valor_servicio"],
+                        caso["operario_nombre"],
+                    ),
+                    ("120000.00", "120000.00", "6000.00", "op"),
+                )
+                self.assertEqual(caso["registrado_por_nombre"], "recepcion")
+                self.assertEqual((caso["cantidad_afectada"], caso["prenda_cantidad"]), (1, 1))
+                self.assertEqual(self.client.get(caso["foto_url"]).status_code, 200)
+
+    def test_el_operario_no_ve_la_seccion(self):
+        self.client.force_authenticate(self.operario)
+
+        self.assertEqual(self.client.get(self.url_danos).status_code, 403)
+        self.assertEqual(self.client.get(f"{self.url_danos}/{self.dano_registrado.pk}/foto").status_code, 403)
+
+    def test_el_administrador_marca_el_pago_y_queda_en_el_historial(self):
+        response = self.pagar_dano(self.admin)
+
+        self.assertEqual(response.status_code, 200, response.json())
+        self.dano_registrado.refresh_from_db()
+        self.assertEqual(
+            (self.dano_registrado.estado, self.dano_registrado.pagado_por, self.dano_registrado.observacion_pago),
+            ("pagado", self.admin, "Transferencia a Ana"),
+        )
+        self.assertIsNotNone(self.dano_registrado.pagado_en)
+        self.assertEqual(
+            self.eventos(Evento.PAGO_DANO).get().detalle,
+            "$120000.00 pagados al cliente por daño de 1 de 1 x Camisa · Algodon. Transferencia a Ana",
+        )
+        self.assertEqual(self.pagar_dano(self.admin).status_code, 400)
+
+    def test_el_pago_exige_observacion(self):
+        self.assertEqual(self.pagar_dano(self.admin, observacion=" ").status_code, 400)
+        self.dano_registrado.refresh_from_db()
+        self.assertEqual(self.dano_registrado.estado, "pendiente")
+
+    def test_la_recepcionista_no_marca_el_pago(self):
+        self.assertEqual(self.pagar_dano(self.recepcionista).status_code, 403)
+        self.dano_registrado.refresh_from_db()
+        self.assertEqual(self.dano_registrado.estado, "pendiente")
+
+    def test_se_filtra_por_estado(self):
+        self.pagar_dano(self.admin)
+        self.client.force_authenticate(self.recepcionista)
+
+        self.assertEqual(self.client.get(f"{self.url_danos}?estado=pendiente").json(), [])
+        self.assertEqual(len(self.client.get(f"{self.url_danos}?estado=pagado").json()), 1)
+
+
+class EntregaConMuchasFotosTests(CatalogoDePruebaMixin, APITestCase):
+    def test_cinco_prendas_con_novedad_y_foto_de_500_kb_caben_en_una_entrega(self):
+        self.crear_catalogo()
+        self.client.force_authenticate(self.recepcionista)
+        self.registrar(*(self.prenda(self.planchado) for _ in range(5)))
+        orden = Orden.objects.get()
+        self.client.post(f"/api/ordenes/{orden.pk}/pagos", {"monto": "30000", "metodo": "efectivo"}, format="json")
+        Orden.objects.filter(pk=orden.pk).update(estado=Orden.Estado.LISTA)
+        foto = data_url(JPEG[:4] + b"0" * (500 * 1024 - 4))
+
+        response = self.client.post(
+            f"/api/ordenes/{orden.pk}/entrega",
+            {
+                "prendas": [
+                    {"prenda": p.pk, "resultado": "novedad", "observacion": "Mancha", "foto": foto}
+                    for p in orden.prendas.all()
+                ]
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200, response.content[:200])
+        self.assertEqual(Novedad.objects.count(), 5)
+
+
+class AcumularPuntosTests(CatalogoDePruebaMixin, APITestCase):
+    def setUp(self):
+        self.crear_catalogo()
+        self.client.force_authenticate(self.recepcionista)
+        # Dos prendas: 6000 + 10000 = 16000.
+        self.registrar(self.prenda(self.planchado), self.prenda(self.lavado, color="rojo"))
+        self.orden = Orden.objects.get()
+
+    def pagar(self, monto="16000"):
+        self.client.post(
+            f"/api/ordenes/{self.orden.pk}/pagos",
+            {"monto": monto, "metodo": "efectivo"},
+            format="json",
+        )
+
+    def entregar(self):
+        Orden.objects.filter(pk=self.orden.pk).update(estado=Orden.Estado.LISTA)
+        verificaciones = [{"prenda": p.pk, "coincide": True} for p in self.orden.prendas.all()]
+        return self.client.post(
+            f"/api/ordenes/{self.orden.pk}/entrega", {"prendas": verificaciones}, format="json"
+        )
+
+    def puntos(self):
+        self.cliente.refresh_from_db()
+        return self.cliente.puntos
+
+    def test_al_cerrar_la_orden_pagada_suma_los_puntos_al_saldo_del_cliente(self):
+        self.pagar()
+
+        response = self.entregar()
+
+        self.assertEqual(response.status_code, 200, response.json())
+        self.assertEqual(self.puntos(), 16)
+        evento = self.orden.historial.filter(tipo_evento=Evento.ENTREGA).get()
+        self.assertIn("Puntos: +16 (saldo 16)", evento.detalle)
+
+    def test_los_puntos_se_suman_al_saldo_anterior(self):
+        Cliente.objects.filter(pk=self.cliente.pk).update(puntos=5)
+        self.pagar()
+
+        self.entregar()
+
+        self.assertEqual(self.puntos(), 21)
+
+    def test_pagar_sin_cerrar_la_orden_no_suma_puntos(self):
+        self.pagar()
+
+        self.assertEqual(self.puntos(), 0)
+
+    def test_si_la_base_falla_no_se_suman_puntos_ni_se_cierra_la_orden(self):
+        self.pagar()
+
+        with mock.patch.object(
+            Cliente, "save", side_effect=OperationalError("sin conexion")
+        ), self.assertLogs("ordenes.historial", level="ERROR") as logs:
+            response = self.entregar()
+
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("sin conexion", "\n".join(logs.output))
+        self.orden.refresh_from_db()
+        self.assertEqual(self.orden.estado, Orden.Estado.LISTA)
+        self.assertEqual(self.puntos(), 0)
+        self.assertFalse(self.orden.historial.filter(tipo_evento=Evento.ENTREGA).exists())
+
+
+class MigracionValorUnitarioDeclaradoTests(TransactionTestCase):
+    antes = [("ordenes", "0013_dano_cantidad_afectada")]
+    despues = [("ordenes", "0014_dano_valor_unitario_declarado")]
+    # Al terminar, la base vuelve a la ultima migracion para las pruebas que siguen.
+    ultima = [("ordenes", "0015_quitar_duracion_estimada")]
+
+    def test_un_dano_existente_conserva_su_total_y_reparte_el_valor_por_unidad(self):
+        executor = MigrationExecutor(connection)
+        executor.migrate(self.antes)
+        # Todo con los modelos de ese momento: la tabla de ordenes tambien era distinta.
+        otras = [nodo for nodo in executor.loader.graph.leaf_nodes() if nodo[0] != "ordenes"]
+        apps = executor.loader.project_state(otras + self.antes).apps
+        recepcion = apps.get_model("accounts", "User").objects.create(username="r", rol="recepcionista")
+        cliente = apps.get_model("clientes", "Cliente").objects.create(
+            documento="1", nombre_completo="Pilar", telefono="3"
+        )
+        orden = apps.get_model("ordenes", "Orden").objects.create(
+            codigo="SW-VIEJA001", cliente=cliente, recepcionista=recepcion
+        )
+        prenda = apps.get_model("ordenes", "Prenda").objects.create(
+            orden=orden,
+            tipo_prenda=apps.get_model("catalogo", "TipoPrenda").objects.create(nombre="Pantalon"),
+            cantidad=3,
+        )
+        apps.get_model("ordenes", "DanoPrenda").objects.create(
+            orden_id=orden.pk,
+            prenda_id=prenda.pk,
+            tipo="perdida",
+            cantidad_afectada=3,
+            descripcion="No aparece",
+            valor_declarado=Decimal("75000"),
+            valor_servicio=Decimal("54000"),
+        )
+
+        executor.loader.build_graph()
+        executor.migrate(self.despues)
+
+        dano = DanoPrenda.objects.get()
+        self.assertEqual(
+            (dano.valor_declarado, dano.valor_unitario_declarado, dano.valor_servicio),
+            (Decimal("75000"), Decimal("25000"), Decimal("54000")),
+        )
+        executor.loader.build_graph()
+        executor.migrate(self.ultima)
+
+
+BOGOTA = ZoneInfo("America/Bogota")
+
+
+def en_bogota(dia, hora, mes=11):
+    return datetime(2026, mes, dia, hora, tzinfo=BOGOTA)
+
+
+class Relacion(list):
+    """Imita lo que la estimacion lee de un related manager."""
+
+    def all(self):
+        return self
+
+    def order_by(self, *campos):
+        return self
+
+    def last(self):
+        return self[-1] if self else None
+
+
+def orden_simulada(estado, prendas=3, cambios=(), novedad_desde=None, cache=None):
+    """`cambios`: (momento, detalle) de los eventos de cambio de estado, en orden."""
+    return SimpleNamespace(
+        estado=estado,
+        fecha_estimada_entrega=cache,
+        creado_en=cambios[0][0] if cambios else en_bogota(1, 8),
+        prendas=Relacion([SimpleNamespace(cantidad=prendas, dano=None)]),
+        historial=Relacion(
+            SimpleNamespace(fecha=momento, tipo_evento=Evento.CAMBIO_ESTADO, detalle=detalle)
+            for momento, detalle in cambios
+        ),
+        novedades=Relacion([SimpleNamespace(estado_anterior=novedad_desde)] if novedad_desde else []),
+    )
+
+
+class EstimacionFechaEntregaTests(SimpleTestCase):
+    """Noviembre de 2026: el lunes 16 es festivo (Independencia de Cartagena)."""
+
+    def estimar(self, estado, desde, ahora=None, prendas=3, **extra):
+        cambios = extra.pop("cambios", [(desde, f"Anterior → {estado}")])
+        orden = orden_simulada(estado, prendas, cambios, **extra)
+        return calcular_fecha_estimada(orden, ahora or desde)
+
+    def test_horas_en_proceso_por_rango_de_prendas(self):
+        esperado = {
+            1: 24, 4: 24, 5: 48, 7: 48, 8: 72, 10: 72, 11: 96, 15: 96, 16: 120, 20: 120,
+            21: 144, 30: 144, 31: 168, 40: 168, 41: 192, 55: 216,
+        }
+        self.assertEqual({n: horas_en_proceso(n) for n in esperado}, esperado)
+
+    def test_48_horas_son_2_dias_y_60_horas_son_3(self):
+        # Clasificada con 3 prendas: 12 + 24 + 12 = 48 h. En proceso con 5: 48 + 12 = 60 h.
+        self.assertEqual(self.estimar("Clasificada", en_bogota(23, 8)), date(2026, 11, 25))
+        self.assertEqual(self.estimar("En proceso", en_bogota(23, 8), prendas=5), date(2026, 11, 26))
+
+    def test_una_orden_de_31_prendas_suma_un_dia_mas_en_proceso(self):
+        # 12 + 168 + 12 = 192 h = 8 dias habiles desde el lunes 23 (sin el domingo 29).
+        self.assertEqual(self.estimar("Clasificada", en_bogota(23, 8), prendas=31), date(2026, 12, 2))
+
+    def test_al_avanzar_de_etapa_se_recalcula_con_lo_que_falta(self):
+        recibida = self.estimar("Recibida", en_bogota(23, 8))
+        en_proceso = self.estimar(
+            "En proceso", en_bogota(24, 9),
+            cambios=[(en_bogota(23, 8), "En espera → Recibida"), (en_bogota(24, 9), "Clasificada → En proceso")],
+        )
+
+        self.assertEqual(recibida, date(2026, 11, 25))
+        self.assertEqual(en_proceso, date(2026, 11, 26))
+
+    def test_la_etapa_atrasada_se_recalcula_desde_ahora_con_margen_y_nunca_queda_en_el_pasado(self):
+        # En proceso desde el lunes 23 (24 h): el jueves 26 ya va atrasada: 12 h de margen + 12 h.
+        atrasada = self.estimar("En proceso", en_bogota(23, 8), ahora=en_bogota(26, 10))
+        mucho_despues = self.estimar("En proceso", en_bogota(2, 8), ahora=en_bogota(26, 10))
+
+        self.assertEqual(atrasada, date(2026, 11, 27))
+        self.assertEqual(mucho_despues, date(2026, 11, 27))
+
+    def test_el_reproceso_por_una_novedad_cuenta_en_proceso_de_nuevo(self):
+        fecha = self.estimar(
+            "En proceso", None, ahora=en_bogota(25, 10),
+            cambios=[
+                (en_bogota(23, 8), "Clasificada → En proceso"),
+                (en_bogota(23, 14), "En proceso → Con novedad"),
+                (en_bogota(25, 9), "Agregar servicio: Ana pide lavarla. Con novedad → En proceso"),
+            ],
+        )
+
+        self.assertEqual(fecha, date(2026, 11, 27))
+
+    def test_con_novedad_se_estima_desde_la_etapa_en_que_estaba(self):
+        fecha = self.estimar(
+            "Con novedad", None, ahora=en_bogota(24, 10), novedad_desde="Control de calidad",
+            cambios=[(en_bogota(24, 8), "En proceso → Control de calidad"),
+                     (en_bogota(24, 9), "Control de calidad → Con novedad")],
+        )
+
+        self.assertEqual(fecha, date(2026, 11, 25))
+
+    def test_lista_y_entregada_conservan_la_ultima_estimacion_y_las_demas_no_tienen(self):
+        for estado, esperado in (
+            ("Lista para entrega", date(2026, 11, 20)),
+            ("Entregada", date(2026, 11, 20)),
+            ("Cancelada", None),
+            ("En espera", None),
+        ):
+            with self.subTest(estado=estado):
+                orden = orden_simulada(estado, cache=date(2026, 11, 20))
+                self.assertEqual(calcular_fecha_estimada(orden, en_bogota(30, 8)), esperado)
+
+    def test_recibida_un_sabado_se_entrega_el_martes_o_el_miercoles_si_el_lunes_es_festivo(self):
+        self.assertEqual(self.estimar("Recibida", en_bogota(21, 8)), date(2026, 11, 24))
+        self.assertEqual(self.estimar("Recibida", en_bogota(14, 8)), date(2026, 11, 18))
+
+    def test_dias_habiles_de_lunes_a_sabado_sin_domingos_ni_festivos(self):
+        casos = [
+            ("sabado mas 1 es lunes", date(2026, 11, 21), 1, date(2026, 11, 23)),
+            ("sabado con lunes festivo", date(2026, 11, 14), 1, date(2026, 11, 17)),
+            ("domingo es el siguiente habil", date(2026, 11, 22), 0, date(2026, 11, 23)),
+            ("domingo antes de festivo", date(2026, 11, 15), 0, date(2026, 11, 17)),
+            ("puente festivo en medio", date(2026, 11, 13), 2, date(2026, 11, 17)),
+            ("un dia habil con 0 es el mismo", date(2026, 11, 20), 0, date(2026, 11, 20)),
+            ("Semana Santa", date(2026, 4, 1), 1, date(2026, 4, 4)),
+        ]
+        for nombre, desde, dias, esperado in casos:
+            with self.subTest(nombre):
+                self.assertEqual(sumar_dias_habiles(desde, dias), esperado)
+
+    def test_un_recalculo_el_viernes_puede_caer_en_sabado(self):
+        fecha = self.estimar("En proceso", en_bogota(18, 8), ahora=en_bogota(20, 10))
+
+        self.assertEqual(fecha, date(2026, 11, 21))
+
+    def test_un_recalculo_que_caeria_en_domingo_pasa_al_lunes(self):
+        fecha = self.estimar("En proceso", en_bogota(18, 8), ahora=en_bogota(21, 10))
+
+        self.assertEqual(fecha, date(2026, 11, 23))
+
+
+class FechaEstimadaEnLaApiTests(CatalogoDePruebaMixin, APITestCase):
+    def test_ningun_endpoint_muestra_horas_duraciones_ni_margenes(self):
+        self.crear_catalogo()
+        operario = User.objects.create_user(username="op", password="x", rol=User.Rol.OPERARIO)
+        self.client.force_authenticate(self.recepcionista)
+        orden = self.registrar(self.prenda(self.planchado)).json()
+        url = f"/api/ordenes/{orden['id']}"
+        self.client.post(f"{url}/pagos", {"monto": "6000", "metodo": "efectivo"}, format="json")
+        self.client.post(f"{url}/asignacion", {"operario": operario.pk}, format="json")
+
+        respuestas = [self.client.get(url).json(), self.client.get("/api/ordenes").json()]
+        self.client.force_authenticate(operario)
+        respuestas.append(self.client.get("/api/ordenes/bandeja").json())
+        self.client.force_authenticate(None)
+        respuestas.append(self.client.get(f"/api/ordenes/consulta/{orden['codigo']}").json())
+
+        hoy = timezone.localdate()
+        self.assertEqual(respuestas[0]["fecha_estimada_entrega"], sumar_dias_habiles(hoy, 2).isoformat())
+        for respuesta in respuestas:
+            texto = str(respuesta).lower()
+            for interno in ("duracion", "horas", "margen"):
+                self.assertNotIn(interno, texto)
+
+
+class ComprobanteAlAbonarTests(CatalogoDePruebaMixin, APITestCase):
+    def setUp(self):
+        self.crear_catalogo()
+        self.client.force_authenticate(self.recepcionista)
+        # Una camisa de algodon de 2,5 kg con lavado (4000/kg = 10000) y planchado (6000).
+        self.orden = Orden.objects.get(
+            pk=self.registrar(self.prenda(self.lavado, self.planchado)).json()["id"]
+        )
+
+    def pagar(self, monto, metodo="efectivo"):
+        return self.client.post(
+            f"/api/ordenes/{self.orden.pk}/pagos", {"monto": monto, "metodo": metodo}, format="json"
+        )
+
+    def test_al_alcanzar_el_abono_minimo_se_genera_el_comprobante_de_abono(self):
+        self.pagar("5000")
+
+        comprobante = Comprobante.objects.get()
+        self.orden.refresh_from_db()
+        self.assertEqual((comprobante.orden, comprobante.tipo), (self.orden, Comprobante.Tipo.ABONO))
+        contenido = comprobante.contenido
+        self.assertEqual(
+            {k: v for k, v in contenido.items() if k not in ("prendas", "pagos")},
+            {
+                "codigo": self.orden.codigo,
+                "cliente": "Ana Gomez",
+                "subtotal": "16000.00",
+                "descuento": "0.00",
+                "total_servicio": "16000.00",
+                "total_pagado": "5000.00",
+                "saldo_pendiente": "11000.00",
+                "fecha_estimada_entrega": self.orden.fecha_estimada_entrega.isoformat(),
+            },
+        )
+        self.assertEqual(
+            contenido["prendas"],
+            [
+                {
+                    "tipo_prenda": "Camisa",
+                    "material": "Algodon",
+                    "cantidad": 1,
+                    "servicios": [
+                        {"servicio": "Lavado", "valor": "10000.00"},
+                        {"servicio": "Planchado", "valor": "6000.00"},
+                    ],
+                    "valor": "16000.00",
+                }
+            ],
+        )
+        self.assertEqual(len(contenido["pagos"]), 1)
+        self.assertEqual(
+            (contenido["pagos"][0]["metodo"], contenido["pagos"][0]["monto"]), ("Efectivo", "5000.00")
+        )
+        self.assertRegex(contenido["pagos"][0]["fecha"], r"-05:00$")
+
+    def test_un_pago_por_debajo_del_abono_no_genera_comprobante(self):
+        self.pagar("1000")
+
+        self.assertFalse(Comprobante.objects.exists())
+
+    def test_el_comprobante_queda_congelado_aunque_despues_haya_mas_pagos_o_cambien_las_tarifas(self):
+        self.pagar("5000")
+        antes = Comprobante.objects.get().contenido
+
+        self.pagar("3000", "tarjeta")
+        Tarifa.objects.filter(servicio=self.planchado).update(valor_base=Decimal("9000"))
+
+        self.assertEqual(Comprobante.objects.count(), 1)
+        self.assertEqual(Comprobante.objects.get().contenido, antes)
+
+    def test_si_falla_el_comprobante_no_se_registra_el_pago_ni_cambia_el_estado(self):
+        with mock.patch(
+            "ordenes.comprobantes.Comprobante.save", side_effect=OperationalError("sin conexion")
+        ), self.assertLogs("ordenes.historial", level="ERROR"):
+            response = self.pagar("5000")
+
+        self.assertEqual(response.status_code, 503)
+        self.orden.refresh_from_db()
+        self.assertEqual(self.orden.estado, Orden.Estado.EN_ESPERA)
+        self.assertEqual(self.orden.total_pagado(), 0)
+        self.assertFalse(Comprobante.objects.exists())
+
+    def test_una_orden_cancelada_no_genera_comprobante(self):
+        self.client.post(
+            f"/api/ordenes/{self.orden.pk}/cancelacion", {"motivo": "Se retracto"}, format="json"
+        )
+
+        self.assertFalse(Comprobante.objects.exists())
+
+
+class ComprobanteAlEntregarTests(EntregaEnMostradorMixin, APITestCase):
+    def setUp(self):
+        super().setUp()
+        self.lista_para_entregar()
+
+    def comprobantes(self, usuario=None):
+        self.client.force_authenticate(usuario or self.recepcionista)
+        return self.client.get(f"/api/ordenes/{self.orden.pk}/comprobantes")
+
+    def test_al_entregar_se_genera_el_comprobante_con_los_pagos_y_el_estado(self):
+        self.entregar(self.coincide(self.camisa_1), self.coincide(self.camisa_2))
+
+        comprobante = Comprobante.objects.get(tipo=Comprobante.Tipo.ENTREGA)
+        contenido = comprobante.contenido
+        self.assertEqual(
+            (contenido["estado"], contenido["estado_pago"], contenido["total_servicio"], contenido["total_pagado"]),
+            ("Entregada", "Pagada", "12000.00", "12000.00"),
+        )
+        self.assertTrue(contenido["fecha_entrega"])
+        self.assertEqual([p["monto"] for p in contenido["pagos"]], ["12000.00"])
+        self.assertEqual([p["observaciones"] for p in contenido["prendas"]], [[], []])
+        self.assertEqual(contenido["prendas"][0]["servicios"], [{"servicio": "Planchado", "valor": "6000.00"}])
+
+    def test_el_comprobante_de_entrega_lista_las_observaciones_de_cada_prenda(self):
+        self.client.force_authenticate(self.recepcionista)
+        Orden.objects.filter(pk=self.orden.pk).update(estado=Orden.Estado.EN_PROCESO)
+        self.client.force_authenticate(self.operario)
+        self.client.post(
+            f"/api/ordenes/{self.orden.pk}/novedades",
+            {"prenda": self.camisa_2.pk, "descripcion": "Mancha de tinta", "foto": data_url(JPEG)},
+            format="json",
+        )
+        self.client.force_authenticate(self.recepcionista)
+        self.client.post(
+            f"/api/ordenes/{self.orden.pk}/decision",
+            {"decision": "continuar", "observacion": "Ana autoriza"},
+            format="json",
+        )
+        Orden.objects.filter(pk=self.orden.pk).update(estado=Orden.Estado.LISTA)
+
+        response = self.entregar(self.perdida(self.camisa_1), self.coincide(self.camisa_2))
+
+        self.assertEqual(response.status_code, 200, response.json())
+        prendas = Comprobante.objects.get(tipo=Comprobante.Tipo.ENTREGA).contenido["prendas"]
+        self.assertEqual(
+            [p["observaciones"] for p in prendas],
+            [["Pérdida: No aparece en la bodega"], ["Mancha de tinta"]],
+        )
+
+    def test_entregar_con_descuento_tambien_genera_el_comprobante(self):
+        self.entregar(self.novedad(self.camisa_1), self.coincide(self.camisa_2))
+        self.client.force_authenticate(self.recepcionista)
+        novedad = Novedad.objects.get()
+        self.client.post(
+            f"/api/ordenes/{self.orden.pk}/decision",
+            {
+                "decision": "entregar_con_descuento",
+                "observacion": "Ana acepta",
+                "gravedades": [{"novedad": novedad.pk, "gravedad": "leve"}],
+            },
+            format="json",
+        )
+
+        contenido = Comprobante.objects.get(tipo=Comprobante.Tipo.ENTREGA).contenido
+        self.assertEqual(contenido["estado"], "Entregada")
+        self.assertEqual(contenido["prendas"][0]["observaciones"], ["Costura desviada en el puno"])
+
+    def test_la_recepcionista_y_el_administrador_pueden_volver_a_ver_los_comprobantes(self):
+        self.entregar(self.coincide(self.camisa_1), self.coincide(self.camisa_2))
+
+        for usuario in (self.recepcionista, self.admin):
+            with self.subTest(usuario=usuario.username):
+                response = self.comprobantes(usuario)
+
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(
+                    [(c["tipo"], c["tipo_nombre"]) for c in response.json()],
+                    [("entrega", "Comprobante de entrega")],
+                )
+                self.assertEqual(response.json()[0]["contenido"]["codigo"], self.orden.codigo)
+
+    def test_el_operario_y_quien_no_tiene_sesion_no_ven_los_comprobantes(self):
+        self.assertEqual(self.comprobantes(self.operario).status_code, 403)
+        self.client.force_authenticate(None)
+        self.assertEqual(self.client.get(f"/api/ordenes/{self.orden.pk}/comprobantes").status_code, 403)
+
+    def test_si_falla_el_comprobante_la_orden_no_se_entrega(self):
+        with mock.patch(
+            "ordenes.comprobantes.Comprobante.save", side_effect=OperationalError("sin conexion")
+        ), self.assertLogs("ordenes.historial", level="ERROR"):
+            response = self.entregar(self.coincide(self.camisa_1), self.coincide(self.camisa_2))
+
+        self.assertEqual(response.status_code, 503)
+        self.orden.refresh_from_db()
+        self.assertEqual(self.orden.estado, Orden.Estado.LISTA)
+        self.assertFalse(Comprobante.objects.exists())
+        self.assertFalse(self.eventos(Evento.ENTREGA).exists())
+
+
+class ComprobanteInmutableTests(TestCase):
+    def setUp(self):
+        self.orden = crear_orden()
+        self.comprobante = Comprobante.objects.create(
+            orden=self.orden, tipo=Comprobante.Tipo.ABONO, contenido={"codigo": self.orden.codigo}
+        )
+
+    def test_no_se_puede_editar_ni_borrar(self):
+        self.comprobante.contenido = {"codigo": "otro"}
+        with self.assertRaises(PermissionDenied):
+            self.comprobante.save()
+        with self.assertRaises(PermissionDenied):
+            self.comprobante.delete()
+        with self.assertRaises(PermissionDenied):
+            Comprobante.objects.update(contenido={})
+        with self.assertRaises(PermissionDenied):
+            Comprobante.objects.all().delete()
+
+    def test_solo_hay_un_comprobante_de_cada_tipo_por_orden(self):
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            Comprobante.objects.create(orden=self.orden, tipo=Comprobante.Tipo.ABONO, contenido={})
+
+
+class RegistrarQuejaApiTests(APITestCase):
+    def setUp(self):
+        self.orden = crear_orden(codigo="SW-ABCD2345")
+        Orden.objects.filter(pk=self.orden.pk).update(estado=Orden.Estado.ENTREGADA)
+
+    def enviar(self, **cambios):
+        datos = {
+            "tipo": "queja",
+            "codigo_orden": "SW-ABCD2345",
+            "nombre": "Ana Gomez",
+            "documento": "1090123456",
+            "correo": "ana@example.com",
+            "telefono": "3001112233",
+            "mensaje": "La camisa llego con una mancha.",
+        }
+        datos.update(cambios)
+        return self.client.post("/api/pqrs", datos, format="json")
+
+    def test_sin_sesion_registra_la_queja_de_una_orden_entregada_pendiente_de_gestion(self):
+        response = self.enviar()
+
+        self.assertEqual(response.status_code, 201, response.json())
+        self.assertEqual(response.json()["estado"], "Pendiente")
+        queja = Queja.objects.get()
+        self.assertEqual(queja.orden, self.orden)
+        self.assertEqual(queja.estado, Queja.Estado.PENDIENTE)
+        self.assertEqual(queja.mensaje, "La camisa llego con una mancha.")
+
+    def test_el_telefono_es_opcional(self):
+        self.assertEqual(self.enviar(telefono="").status_code, 201)
+
+    def test_rechaza_la_queja_de_una_orden_no_entregada(self):
+        for estado in Orden.Estado.values:
+            if estado == Orden.Estado.ENTREGADA:
+                continue
+            with self.subTest(estado=estado):
+                Orden.objects.filter(pk=self.orden.pk).update(estado=estado)
+
+                response = self.enviar()
+
+                self.assertEqual(response.status_code, 400)
+                self.assertIn("solo aplica a ordenes ya entregadas", str(response.json()))
+        self.assertFalse(Queja.objects.exists())
+
+    def test_rechaza_un_codigo_que_no_existe(self):
+        response = self.enviar(codigo_orden="SW-ZZZZ9999")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("No encontramos una orden con ese codigo", str(response.json()))
+
+    def test_por_ahora_solo_recibe_quejas(self):
+        for tipo in ("peticion", "reclamo", "sugerencia"):
+            with self.subTest(tipo=tipo):
+                response = self.enviar(tipo=tipo)
+
+                self.assertEqual(response.status_code, 400)
+                self.assertIn("solo se reciben quejas", str(response.json()))
+        self.assertFalse(Queja.objects.exists())
+
+    def test_rechaza_datos_incompletos_sin_registrar_nada(self):
+        for campo in ("codigo_orden", "nombre", "documento", "correo", "mensaje"):
+            with self.subTest(campo=campo):
+                response = self.enviar(**{campo: ""})
+
+                self.assertEqual(response.status_code, 400)
+                self.assertIn(campo, response.json())
+        self.assertEqual(self.enviar(correo="no-es-correo").status_code, 400)
+        self.assertFalse(Queja.objects.exists())

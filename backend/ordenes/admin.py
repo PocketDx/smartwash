@@ -89,13 +89,20 @@ class OrdenAdmin(HistorialEnAltasMixin, AutoriaAdminMixin):
         "estado_pago",
         "subtotal",
         "descuento",
+        "descuento_novedad",
+        "descuento_dano",
         "valor_total",
         "abono_requerido",
-        "duracion_estimada_dias",
         "fecha_estimada_entrega",
         "abono_alcanzado_en",
     )
     inlines = [PrendaInline, HistorialOrdenInline]
+
+    def get_readonly_fields(self, request, obj=None):
+        # Una orden "Con novedad" solo sale con la decision del cliente (HU19).
+        if obj is not None and obj.estado == Orden.Estado.CON_NOVEDAD:
+            return (*super().get_readonly_fields(request, obj), "estado")
+        return super().get_readonly_fields(request, obj)
 
     def save_model(self, request, obj, form, change):
         anterior = Orden.objects.get(pk=obj.pk) if change else None

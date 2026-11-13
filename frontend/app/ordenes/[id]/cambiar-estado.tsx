@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useRef, useState } from "react";
 
 import { AlertaErrores } from "@/app/catalogo/errores";
 import { cambiarEstadoOrden, type EstadoOrden, type Orden, type User } from "@/lib/api";
@@ -37,9 +37,21 @@ function puedeHacer(paso: Paso, orden: Orden, usuario: User): boolean {
 
 export default function CambiarEstado({ orden, usuario }: { orden: Orden; usuario: User }) {
   const router = useRouter();
-  const [elegido, setElegido] = useState<Paso | null>(null);
+  const [elegidoGuardado, setElegido] = useState<Paso | null>(null);
   const [errores, setErrores] = useState<string[]>([]);
   const [pending, setPending] = useState(false);
+  const enviando = useRef(false);
+
+  if (orden.estado === "Con novedad") {
+    return (
+      <ClayCard className="mb-6">
+        <p className="text-sm text-(--sw-ink-soft)">
+          La orden tiene una novedad registrada: no se puede avanzar hasta que se registre la decision del
+          cliente.
+        </p>
+      </ClayCard>
+    );
+  }
 
   if (orden.estado === "En espera") {
     return (
@@ -53,6 +65,8 @@ export default function CambiarEstado({ orden, usuario }: { orden: Orden; usuari
   }
 
   const pasos = PASOS[orden.estado] ?? [];
+  // La orden pudo cambiar de estado (doble clic, otra pestana): solo vale un paso del estado actual.
+  const elegido = pasos.find((p) => p.destino === elegidoGuardado?.destino) ?? null;
   const disponibles = pasos.filter((paso) => puedeHacer(paso, orden, usuario));
   if (pasos.length === 0) return null;
 
@@ -74,11 +88,17 @@ export default function CambiarEstado({ orden, usuario }: { orden: Orden; usuari
     setErrores([]);
   }
 
+  // Al pasar a "Lista para entrega" el backend envia el correo antes de
+  // responder, y puede tardar hasta 10 s (HU31).
+  const avisa = elegido?.destino === "Lista para entrega";
+
   async function confirmar() {
-    if (!elegido) return;
+    if (!elegido || enviando.current) return;
+    enviando.current = true;
     setPending(true);
     setErrores([]);
     const response = await cambiarEstadoOrden(orden.id, elegido.destino).catch(() => null);
+    enviando.current = false;
     setPending(false);
 
     if (response?.ok) {
@@ -111,10 +131,17 @@ export default function CambiarEstado({ orden, usuario }: { orden: Orden; usuari
           <p className="text-sm text-(--sw-ink)">
             La orden pasara de <strong>{orden.estado}</strong> a <strong>{elegido.destino}</strong>.
             {elegido.reproceso && " El reproceso no tiene costo para el cliente."}
+            {avisa && " Se le enviara un aviso por correo al cliente; puede tardar unos segundos."}
           </p>
           <div className="flex flex-wrap gap-3">
-            <ClayButton type="button" onClick={confirmar} disabled={pending}>
-              {pending ? "Guardando..." : "Confirmar"}
+            <ClayButton type="button" onClick={confirmar} disabled={pending} aria-busy={pending}>
+              {pending && (
+                <span
+                  aria-hidden
+                  className="size-4 animate-spin rounded-full border-2 border-(--sw-ink-soft) border-t-transparent"
+                />
+              )}
+              {pending ? (avisa ? "Guardando y avisando al cliente..." : "Guardando...") : "Confirmar"}
             </ClayButton>
             <ClayButton type="button" variant="secundario" onClick={cancelar} disabled={pending}>
               Cancelar

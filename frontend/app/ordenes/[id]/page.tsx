@@ -4,8 +4,12 @@ import { redirect } from "next/navigation";
 import type { ReactNode } from "react";
 
 import {
+  getCliente,
+  getConfiguracionDescuentos,
   getCurrentUser,
+  getHistorialOrden,
   getMateriales,
+  getNovedadesOrden,
   getOperarios,
   getOrden,
   getPagosOrden,
@@ -13,8 +17,10 @@ import {
   getTarifas,
   getTiposPrenda,
   type EstadoOrden,
+  type TipoDano,
 } from "@/lib/api";
 import { formatCOP, formatFecha } from "@/lib/format";
+import { BadgeClasificacion } from "../../clientes/clasificacion";
 import { ClayBadge, ClayCard, Encabezado } from "../../components/ui/clay";
 import EstadoAbono from "../abono";
 import { tarifasDeHoy } from "../cotizacion";
@@ -23,11 +29,18 @@ import { agruparPrendas, detallesDe } from "../agrupar";
 import AgregarPrenda from "./agregar-prenda";
 import AgregarServicio from "./agregar-servicio";
 import AsignarOperario from "./asignar-operario";
+import AvisoCliente from "./aviso-cliente";
 import CambiarEstado from "./cambiar-estado";
+import CancelarOrden from "./cancelar-orden";
+import DecisionEntrega from "./decision-entrega";
+import DecisionProceso from "./decision-proceso";
+import NovedadesOrden from "./novedades-orden";
 import PagosOrden from "./pagos-orden";
 import RegistrarEntrega from "./registrar-entrega";
+import RegistrarNovedad from "./registrar-novedad";
 
 const ESTADOS_QUE_ADMITEN_LINEAS: EstadoOrden[] = ["En espera", "Recibida", "Clasificada"];
+const DANO: Record<TipoDano, string> = { dano: "Dañada por la lavanderia", perdida: "Perdida" };
 
 function Dato({ etiqueta, children }: { etiqueta: string; children: ReactNode }) {
   return (
@@ -53,7 +66,7 @@ export default async function OrdenPage({
   const { registrada } = await searchParams;
   const puedeEditar = user.rol !== "operario";
 
-  const [orden, tiposPrenda, materiales, servicios, tarifas, pagos, operarios] = await Promise.all([
+  const [orden, tiposPrenda, materiales, servicios, tarifas, pagos, operarios, novedades, historial, configuracion] = await Promise.all([
     getOrden(id, cookieStore),
     puedeEditar ? getTiposPrenda(cookieStore) : null,
     puedeEditar ? getMateriales(cookieStore) : null,
@@ -61,6 +74,9 @@ export default async function OrdenPage({
     puedeEditar ? getTarifas(cookieStore, true) : null,
     puedeEditar ? getPagosOrden(id, cookieStore) : null,
     puedeEditar ? getOperarios(cookieStore) : null,
+    getNovedadesOrden(id, cookieStore),
+    puedeEditar ? getHistorialOrden(id, cookieStore) : null,
+    puedeEditar ? getConfiguracionDescuentos(cookieStore) : null,
   ]);
 
   if (orden === null) {
@@ -78,6 +94,7 @@ export default async function OrdenPage({
     );
   }
 
+  const cliente = puedeEditar ? await getCliente(orden.cliente, cookieStore) : null;
   const tarifasVigentes = tarifas ? tarifasDeHoy(tarifas) : [];
   const admiteLineas = puedeEditar && ESTADOS_QUE_ADMITEN_LINEAS.includes(orden.estado);
   const conCatalogo = admiteLineas && tiposPrenda !== null && materiales !== null && servicios !== null;
@@ -105,6 +122,12 @@ export default async function OrdenPage({
         }
       >
         {orden.cliente_nombre}
+        {cliente && (
+          <>
+            {" "}
+            <BadgeClasificacion clasificacion={cliente.clasificacion} />
+          </>
+        )}
       </Encabezado>
 
       {registrada && (
@@ -117,9 +140,26 @@ export default async function OrdenPage({
         </div>
       )}
 
+      {orden.estado === "Cancelada" && (
+        <div role="status" className="clay-sm mb-6 border-l-8 border-l-(--sw-coral) p-4 text-sm">
+          <p className="font-semibold text-(--sw-ink)">Orden cancelada</p>
+          <p className="mt-1 text-(--sw-ink-soft)">Motivo: {orden.motivo_cancelacion}</p>
+        </div>
+      )}
+
+      {historial && <AvisoCliente orden={orden} historial={historial} />}
       {puedeEditar && orden.estado === "Lista para entrega" && <RegistrarEntrega orden={orden} />}
       <CambiarEstado orden={orden} usuario={user} />
+      {puedeEditar && orden.estado === "Con novedad" && novedades && configuracion && (
+        <DecisionEntrega orden={orden} novedades={novedades} operarios={operarios} configuracion={configuracion} />
+      )}
+      {puedeEditar && orden.estado === "Con novedad" && novedades && (
+        <DecisionProceso orden={orden} novedades={novedades} servicios={servicios} tarifas={tarifasVigentes} />
+      )}
+      <RegistrarNovedad orden={orden} usuario={user} />
+      {novedades && <NovedadesOrden novedades={novedades} />}
       {puedeEditar && <AsignarOperario orden={orden} operarios={operarios} usuario={user} />}
+      {puedeEditar && <CancelarOrden orden={orden} novedades={novedades} />}
 
       <ClayCard className="mb-6">
         <dl className="grid grid-cols-2 gap-5 sm:grid-cols-4">
@@ -127,6 +167,12 @@ export default async function OrdenPage({
           <Dato etiqueta="Descuento fidelizacion">
             {Number(orden.descuento) > 0 ? `− ${formatCOP(orden.descuento)}` : formatCOP(0)}
           </Dato>
+          {Number(orden.descuento_novedad) > 0 && (
+            <Dato etiqueta="Descuento por novedad">− {formatCOP(orden.descuento_novedad)}</Dato>
+          )}
+          {Number(orden.descuento_dano) > 0 && (
+            <Dato etiqueta="Servicios dañados o perdidos">− {formatCOP(orden.descuento_dano)}</Dato>
+          )}
           <Dato etiqueta="Valor total">{formatCOP(orden.valor_total)}</Dato>
           <Dato etiqueta="Abono requerido (30 %)">
             <span className="block">{formatCOP(orden.abono_requerido)}</span>
@@ -136,9 +182,9 @@ export default async function OrdenPage({
           </Dato>
           <Dato etiqueta="Pagado">{formatCOP(orden.total_pagado)}</Dato>
           <Dato etiqueta="Saldo pendiente">{formatCOP(orden.saldo_pendiente)}</Dato>
-          <Dato etiqueta="Duracion estimada">
-            {orden.duracion_estimada_dias} {orden.duracion_estimada_dias === 1 ? "dia habil" : "dias habiles"}
-          </Dato>
+          {Number(orden.saldo_a_favor) > 0 && (
+            <Dato etiqueta="Saldo a favor del cliente">{formatCOP(orden.saldo_a_favor)}</Dato>
+          )}
           <Dato etiqueta="Fecha estimada de entrega">
             {orden.fecha_estimada_entrega ? (
               formatFecha(orden.fecha_estimada_entrega)
@@ -160,15 +206,28 @@ export default async function OrdenPage({
       <h2 className="mb-3 text-lg font-bold text-(--sw-ink)">Prendas</h2>
       <div className="flex flex-col gap-3">
         {agruparPrendas(orden.detalle_prendas, (p) =>
-          p.servicios.map((x) => `${x.servicio}:${Number(x.valor_aplicado)}`).sort().join(","),
+          [p.dano ?? "", p.dano_cantidad ?? "", ...p.servicios.map((x) => `${x.servicio}:${Number(x.valor_aplicado)}`).sort()].join(","),
         ).map((grupo) => {
           const [prenda] = grupo.prendas;
           const detalles = detallesDe(grupo);
           return (
             <ClayCard key={prenda.id} className="p-4">
-              <p className="font-semibold text-(--sw-ink)">
+              <p className="flex flex-wrap items-center gap-2 font-semibold text-(--sw-ink)">
                 {grupo.cantidad} × {prenda.tipo_prenda_nombre}
+                {prenda.dano && (
+                  <ClayBadge color="peach">
+                    {prenda.dano_cantidad !== null && prenda.dano_cantidad < prenda.cantidad
+                      ? `${DANO[prenda.dano]}: ${prenda.dano_cantidad} de ${prenda.cantidad} · no se cobran`
+                      : `${DANO[prenda.dano]} · no se cobra`}
+                  </ClayBadge>
+                )}
               </p>
+              {prenda.dano && prenda.dano_valor_declarado !== null && prenda.dano_valor_unitario_declarado !== null && (
+                <p className="mt-1 text-xs text-(--sw-ink-soft)">
+                  Se le debe al cliente {formatCOP(prenda.dano_valor_declarado)} ({prenda.dano_cantidad} ×{" "}
+                  {formatCOP(prenda.dano_valor_unitario_declarado)} por unidad).
+                </p>
+              )}
               {detalles.length > 0 && (
                 <p className="mt-0.5 text-xs text-(--sw-ink-soft)">{detalles.join(" · ")}</p>
               )}

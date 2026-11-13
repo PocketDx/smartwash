@@ -1,7 +1,14 @@
 import { ClayCard, Encabezado } from "../components/ui/clay";
-import PqrsForm from "./pqrs-form";
+import PqrsForm, { TIPOS } from "./pqrs-form";
 
-export default function PqrsPage() {
+export default async function PqrsPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ codigo?: string; tipo?: string }>;
+}) {
+  const { codigo, tipo } = await searchParams;
+  const tipoInicial = TIPOS.find((t) => t.valor === tipo?.toLowerCase())?.valor ?? "peticion";
+
   return (
     <main className="mx-auto max-w-2xl px-4 py-8 sm:px-8 sm:py-12">
       <Encabezado eyebrow="Atencion al cliente" titulo="PQRS">
@@ -9,7 +16,7 @@ export default function PqrsPage() {
       </Encabezado>
 
       <ClayCard>
-        <PqrsForm />
+        <PqrsForm tipoInicial={tipoInicial} codigoInicial={(codigo ?? "").toUpperCase()} />
       </ClayCard>
     </main>
   );

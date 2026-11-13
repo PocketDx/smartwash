@@ -3,8 +3,9 @@ from django.utils import timezone
 from rest_framework import generics, serializers
 
 from core.permissions import AdministradorORecepcionista
+from ordenes.comprobantes import generar_comprobante
 from ordenes.historial import operacion_sobre_orden, registrar_evento
-from ordenes.models import HistorialOrden, Orden
+from ordenes.models import Comprobante, HistorialOrden, Orden
 
 from .models import Pago
 from .serializers import PagoSerializer
@@ -28,6 +29,7 @@ class PagoListCreateView(generics.ListCreateAPIView):
         # El bloqueo serializa los pagos de una misma orden: dos cobros
         # simultaneos no pueden superar juntos el saldo.
         orden = get_object_or_404(Orden.objects.select_for_update(), pk=self.kwargs["pk"])
+        orden.exigir_no_cancelada()
         monto = serializer.validated_data["monto"]
         saldo = orden.saldo_pendiente()
         if monto > saldo:
@@ -61,3 +63,4 @@ class PagoListCreateView(generics.ListCreateAPIView):
                 f"{estado_anterior} → {orden.estado}: abono minimo alcanzado. "
                 f"Entrega estimada {orden.fecha_estimada_entrega}",
             )
+            generar_comprobante(orden, Comprobante.Tipo.ABONO)
